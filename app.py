@@ -33,55 +33,88 @@ st.title("Wheel accounting")
 
 # Sidebar
 with st.sidebar:
-    st.header("Settings")
-    settings = load_settings()
-    
-    starting_cash = st.number_input(
-        "Starting Capital", 
-        value=float(settings.get("starting_cash", config.DEFAULT_STARTING_CASH)), 
-        step=1000.0
+    st.header("Settings (personal session)")
+
+    # Crea un dizionario persistente nella sessione
+    if "user_settings" not in st.session_state:
+        st.session_state.user_settings = {
+            "starting_cash": float(config.DEFAULT_STARTING_CASH),
+            "ibkr_host": "127.0.0.1",
+            "ibkr_port": 7497,
+            "ibkr_client_id": 1,
+            "ibkr_exchange_hints": {}
+        }
+
+    user_settings = st.session_state.user_settings
+
+    # Starting capital (solo sessione corrente)
+    user_settings["starting_cash"] = st.number_input(
+        "Starting capital",
+        value=float(user_settings["starting_cash"]),
+        step=1000.0,
+        help="Valore iniziale della cassa, salvato solo per questa sessione."
     )
-    
-    if st.button("Save Settings"):
-        settings["starting_cash"] = float(starting_cash)
-        save_settings(settings)
-        st.success("Settings saved.")
-        st.rerun()
 
-    st.caption(f"Storage: {'SQLite' if config.USE_DB else 'CSV'}")
-    
-    if st.button("Erase ALL Data", type="secondary"):
-        if st.checkbox("I'm sure I want to delete all data"):
-            wipe_all_data()
-            st.success("All data wiped. Reloading...")
-            st.rerun()
+    st.caption("Le impostazioni sono temporanee e isolate per ogni utente.")
 
-    # IBKR Connection
+    # Divider
     st.markdown("---")
+
+    # IBKR Connection (solo sessione)
     st.subheader("IBKR Connection")
-    
-    ib_host = st.text_input("Host", value=str(settings.get("ibkr_host", "127.0.0.1")))
-    ib_port = st.number_input("Port", value=int(settings.get("ibkr_port", 7497)))
-    ib_client_id = st.number_input("Client ID", value=int(settings.get("ibkr_client_id", 1)))
-    
+    user_settings["ibkr_host"] = st.text_input("Host", value=user_settings["ibkr_host"])
+    user_settings["ibkr_port"] = st.number_input("Port", value=user_settings["ibkr_port"])
+    user_settings["ibkr_client_id"] = st.number_input("Client ID", value=user_settings["ibkr_client_id"])
+
     col1, col2 = st.columns(2)
-    if col1.button("Save IBKR"):
-        settings["ibkr_host"] = ib_host
-        settings["ibkr_port"] = int(ib_port)
-        settings["ibkr_client_id"] = int(ib_client_id)
-        save_settings(settings)
-        st.success("IBKR settings saved.")
-    
-    if col2.button("Test IBKR"):
+    if col1.button("Test IBKR Connection"):
         ok, info = test_ibkr_connection()
         if ok:
-            st.success(f"Connected! Accounts: {', '.join(info.get('accounts', [])) or 'N/A'}")
+            st.success(f"Connected. Accounts: {', '.join(info.get('accounts', [])) or 'N/A'}")
         else:
-            st.error(f"Failed: {info.get('error', 'Unknown error')}")
+            st.error(f"Connection failed: {info.get('error', 'Unknown error')}")
 
     if not IB_AVAILABLE:
-        st.warning("ib_insync not available")
+        st.warning("IBKR integration (ib_insync) not installed or unavailable.")
 
+    # Divider
+    st.markdown("---")
+
+    # Exchange Hints (sessione corrente)
+    st.subheader("Exchange preferences")
+    eh_symbol = st.text_input("Ticker").strip().upper()
+    eh_exchange = st.selectbox("Preferred Exchange", ["NYSE", "NASDAQ", "ARCA", "SMART"])
+
+    colh1, colh2 = st.columns(2)
+    if colh1.button("Save hint"):
+        if eh_symbol and eh_exchange:
+            user_settings["ibkr_exchange_hints"][eh_symbol] = eh_exchange
+            st.success(f"Hint saved: {eh_symbol} → {eh_exchange}")
+        else:
+            st.warning("Insert a ticker and select a valid exchange.")
+
+    if colh2.button("Remove hint"):
+        if eh_symbol in user_settings["ibkr_exchange_hints"]:
+            del user_settings["ibkr_exchange_hints"][eh_symbol]
+            st.success(f"Hint removed for {eh_symbol}.")
+        else:
+            st.info("No hint found for this ticker.")
+
+    # Show active hints
+    hints = user_settings.get("ibkr_exchange_hints", {})
+    if hints:
+        import pandas as pd
+        st.caption("Current exchange preferences:")
+        st.dataframe(
+            pd.DataFrame([{"Ticker": k, "Exchange": v} for k, v in hints.items()])
+              .sort_values("Ticker"),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # Divider
+    st.markdown("---")
+    st.caption("Session settings are temporary and not saved to disk.")
     # Exchange Hints
     st.markdown("---")
     st.subheader("Exchange Preferences")
