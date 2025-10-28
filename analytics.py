@@ -145,13 +145,8 @@ def build_cash_ledger_inventory_aware(orders_df: pd.DataFrame, positions_df: pd.
     
     o = o.sort_values(["OpenDate", "ID"]).reset_index(drop=True)
 
-    # Initialize balance from current positions (solo per logica assegnazione CALL)
-    balance = {}
-    if not positions_df.empty:
-        for _, r in positions_df.iterrows():
-            ul = clean_ticker(r.get("Underlying", ""))
-            qty = int(r.get("Qty", 0) or 0)
-            balance[ul] = balance.get(ul, 0) + qty
+    # Track collateral commitments
+    collateral_tracker = {}  # {underlying: {expiry_date: amount}}
 
     def _push_audit(ts, ul, ev, delta):
         audit_rows.append({
@@ -172,82 +167,87 @@ def build_cash_ledger_inventory_aware(orders_df: pd.DataFrame, positions_df: pd.
         status = str(r.get("Status", "")).title()
         open_dt = r.get("OpenDate")
         close_dt = r.get("CloseDate")
+        expiry_dt = r.get("Expiry")
 
-        # Nella sezione OPEN - riga ~190
+        # OPEN EVENT - Sell PUT or CALL
         if pd.notna(open_dt) and side == "Sell" and qty > 0 and prem != 0:
-            # CORREGGI: aggiungi * 100
             premium_cash = qty * 100.0 * prem - fees
             
-            collateral_note = f" | Collateral reserved: {format_currency(strike)} * 100 * {int(qty)}" if typ == "PUT" else ""
+            # For PUTs: subtract collateral immediately
+            collateral_flow = 0.0
+            if typ == "PUT":
+                collateral_amount = strike * 100.0 * qty
+                collateral_flow = -collateral_amount
+                
+                # Track this collateral for later release
+                if ul not in collateral_tracker:
+                    collateral_tracker[ul] = {}
+                collateral_tracker[ul][expiry_dt] = collateral_tracker[ul].get(expiry_dt, 0) + collateral_amount
+
+            total_cash_flow = premium_cash + collateral_flow
             
             ledger_rows.append({
                 "Date": open_dt.date(), 
                 "Underlying": ul, 
                 "Event": f"{typ} Sold",
-                "CashFlow": round(premium_cash, 2),
-                "Note": f"Premium {format_currency(prem)} * 100 * {int(qty)} - fees {format_currency(fees)}{collateral_note}",
+                "CashFlow": round(total_cash_flow, 2),
+                "Note": f"Premium {format_currency(prem)} * 100 * {int(qty)} - fees {format_currency(fees)} | Collateral: {format_currency(collateral_flow) if collateral_flow != 0 else 'N/A'}",
                 "Warning": ""
             })
 
-        # CLOSE: Various events
+        # CLOSE EVENTS
         if pd.notna(close_dt):
-            if status == "Assigned" and typ == "PUT":
+            if status == "Expired":
+                if typ == "PUT":
+                    # Release collateral when PUT expires
+                    collateral_amount = collateral_tracker.get(ul, {}).get(expiry_dt, 0)
+                    if collateral_amount > 0:
+                        ledger_rows.append({
+                            "Date": close_dt.date(), 
+                            "Underlying": ul, 
+                            "Event": "PUT Expired - Collateral Released",
+                            "CashFlow": round(collateral_amount, 2),
+                            "Note": f"Collateral released: {format_currency(collateral_amount)}",
+                            "Warning": ""
+                        })
+                        # Remove from tracker
+                        if ul in collateral_tracker and expiry_dt in collateral_tracker[ul]:
+                            del collateral_tracker[ul][expiry_dt]
+                else:  # CALL expired
+                    ledger_rows.append({
+                        "Date": close_dt.date(), 
+                        "Underlying": ul, 
+                        "Event": "CALL Expired",
+                        "CashFlow": 0.0,
+                        "Note": "Premium kept, no collateral involved",
+                        "Warning": ""
+                    })
+
+            elif status == "Assigned" and typ == "PUT":
+                # No cash flow change - collateral was already subtracted
+                # Shares are acquired, but cash doesn't change
                 delta_sh = int(qty * 100)
-                balance[ul] = balance.get(ul, 0) + delta_sh
                 _push_audit(close_dt, ul, "PUT Assigned (shares +)", delta_sh)
-                
-                # Cash flow NEGATIVO per acquisto shares (collateral non era stato sottratto prima)
-                cash_flow = -strike * 100.0 * qty
                 
                 ledger_rows.append({
                     "Date": close_dt.date(), 
                     "Underlying": ul, 
-                    "Event": "PUT Assigned (buy shares)",
-                    "CashFlow": round(cash_flow, 2), 
-                    "Note": f"Buy {int(qty * 100)} @ {format_currency(strike)} using collateral", 
+                    "Event": "PUT Assigned (shares acquired)",
+                    "CashFlow": 0.0, 
+                    "Note": f"Acquired {int(qty * 100)} shares @ {format_currency(strike)} - No cash flow (collateral already reserved)", 
                     "Warning": ""
                 })
 
             elif status == "Calledaway" and typ == "CALL":
-                needed = int(qty * 100)
-                have = balance.get(ul, 0)
-                
-                if have >= needed:
-                    balance[ul] = have - needed
-                    _push_audit(close_dt, ul, "CALL Called Away (shares -)", -needed)
-                    
-                    cash = strike * 100.0 * qty
-                    ledger_rows.append({
-                        "Date": close_dt.date(), 
-                        "Underlying": ul,
-                        "Event": "CALL Called Away (sell shares)",
-                        "CashFlow": round(cash, 2),
-                        "Note": f"Sell {needed} @ {format_currency(strike)}",
-                        "Warning": ""
-                    })
-                else:
-                    _push_audit(close_dt, ul, "CALL Called Away (not enough shares)", 0)
-                    ledger_rows.append({
-                        "Date": close_dt.date(), 
-                        "Underlying": ul,
-                        "Event": "CALL Called Away (sell shares)",
-                        "CashFlow": 0.0,
-                        "Note": f"WARNING: not enough shares (need {needed}, have {have}) → cashflow skipped",
-                        "Warning": "NOT_ENOUGH_SHARES"
-                    })
-
-            elif status == "Expired":
-                _push_audit(close_dt, ul, f"{typ} Expired", 0)
-                
-                # PER PUT: NESSUN cash flow per collateral (non era stato sottratto)
-                expired_note = "Premium kept | Collateral released" if typ == "PUT" else "No extra cash; premium kept"
+                # Add strike proceeds to cash balance
+                strike_proceeds = strike * 100.0 * qty
                 
                 ledger_rows.append({
                     "Date": close_dt.date(), 
-                    "Underlying": ul, 
-                    "Event": f"{typ} Expired",
-                    "CashFlow": 0.0, 
-                    "Note": expired_note, 
+                    "Underlying": ul,
+                    "Event": "CALL Called Away (shares sold)",
+                    "CashFlow": round(strike_proceeds, 2),
+                    "Note": f"Sold {int(qty * 100)} shares @ {format_currency(strike)}",
                     "Warning": ""
                 })
 
