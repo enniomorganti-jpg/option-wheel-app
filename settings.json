@@ -8,12 +8,14 @@
   "ibkr_client_id": 2,
   "ibkr_exchange_hints": {
     "ELF": "NYSE",
-    "AMZN": "NASDAQ",
+    "AMZN": "NYSE",
     "ANET": "NYSE",
     "NVO": "NYSE",
     "QQQ": "NASDAQ",
     "SOFI": "NASDAQ",
     "UNH": "NYSE",
-    "NFLX": "NYSE"
+    "NFLX": "NYSE",
+    "NVDA": "NYSE",
+    "CLOV": "NASDAQ"
   }
 }

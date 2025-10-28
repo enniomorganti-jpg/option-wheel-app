@@ -2,214 +2,342 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from database import load_table, save_table
-from analytics import rebuild_realized_from_orders, build_cash_ledger_inventory_aware, cash_timeline_df
-from utils import positions_nonzero, clean_ticker, format_currency
-from pricing import get_price_for, set_price_for, refresh_all_prices_yf, refresh_prices_ibkr, IB_AVAILABLE
+
 import config
+from database import load_table, save_table
+from analytics import (
+    rebuild_realized_from_orders,
+    build_cash_ledger_inventory_aware,
+    cash_timeline_df,
+)
+from utils import positions_nonzero, clean_ticker, format_currency
+from pricing import (
+    get_price_for,
+    set_price_for,
+    refresh_all_prices_yf,
+    refresh_prices_ibkr,
+    IB_AVAILABLE,
+)
 
-def calculate_csp_collateral(orders_df):
-    if orders_df.empty:
+
+# ------------------------------------------------------------
+# Helper: collateral su PUT aperte (valore istantaneo)
+# ------------------------------------------------------------
+def calculate_csp_collateral(orders_df: pd.DataFrame) -> float:
+    """
+    Collateral = somma Strike * 100 * Qty per tutte le PUT ancora OPEN.
+    """
+    if orders_df is None or orders_df.empty:
         return 0.0
-    
-    open_puts = orders_df[
-        (orders_df["Type"].str.upper() == "PUT") & 
-        (orders_df["Status"].str.upper() == "OPEN")
-    ]
-    
-    collateral = 0.0
-    for _, put in open_puts.iterrows():
-        strike = float(put.get("Strike", 0))
-        qty = int(put.get("Qty", 0))
-        collateral += strike * 100 * qty
-    
-    return collateral
+    o = orders_df.copy()
+    o["Type"] = o.get("Type", "").astype(str).str.upper()
+    o["Status"] = o.get("Status", "").astype(str).str.upper()
+    o["Strike"] = pd.to_numeric(o.get("Strike", 0), errors="coerce").fillna(0.0)
+    o["Qty"] = pd.to_numeric(o.get("Qty", 0), errors="coerce").fillna(0).astype(int)
 
-def calculate_real_cash_balance(settings, orders_df, realized_df, market_value):
-    starting_cash = float(settings.get("starting_cash", 0.0))
-    
-    sold_options = orders_df[orders_df['Side'].str.upper() == 'SELL']
-    total_premiums = (sold_options['PricePerContract'] * 100 * sold_options['Qty']).sum()
-    
-    realized_gains = realized_df['TotalPL'].sum() if not realized_df.empty and 'TotalPL' in realized_df.columns else 0
-    
-    csp_collateral = calculate_csp_collateral(orders_df)
-    
-    total_portfolio_value = starting_cash + total_premiums + realized_gains
-    free_cash = total_portfolio_value - market_value - csp_collateral
-    
-    return free_cash, total_premiums, csp_collateral, total_portfolio_value
+    open_puts = o[(o["Type"] == "PUT") & (o["Status"] == "OPEN")]
+    if open_puts.empty:
+        return 0.0
 
-def render_dashboard(settings):
+    collateral = (open_puts["Strike"] * 100.0 * open_puts["Qty"]).sum()
+    return float(collateral or 0.0)
+
+
+# ------------------------------------------------------------
+# Helper: timeline del collateral (cumulativo nel tempo)
+# Autocontenuto: non richiede altre funzioni esterne.
+# Regole:
+#  - all'OPEN di una PUT (side Sell) aggiungo +strike*100*qty
+#  - alla CLOSE (status != OPEN) rimuovo -strike*100*qty
+#  - Expired/Assigned/Closed liberano il vincolo alla CloseDate
+# ------------------------------------------------------------
+def build_csp_collateral_timeline(orders_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["Date", "DeltaCollateral"]
+    if orders_df is None or orders_df.empty:
+        return pd.DataFrame(columns=cols + ["CollateralOutstanding"])
+
+    o = orders_df.copy()
+    # normalizza tipi e numeri
+    for c in ("OpenDate", "CloseDate"):
+        if c in o.columns:
+            o[c] = pd.to_datetime(o[c], errors="coerce")
+    o["Type"] = o.get("Type", "").astype(str).str.upper()
+    o["Side"] = o.get("Side", "Sell").astype(str).str.title()
+    o["Status"] = o.get("Status", "").astype(str).str.upper()
+    o["Strike"] = pd.to_numeric(o.get("Strike", 0), errors="coerce").fillna(0.0)
+    o["Qty"] = pd.to_numeric(o.get("Qty", 0), errors="coerce").fillna(0).astype(int)
+
+    events = []
+
+    # Aggiungo evento all'apertura (vincolo entra)
+    mask_open_put_sell = (
+        (o["Type"] == "PUT") &
+        (o["Side"] == "Sell") &
+        (o["Qty"] > 0) &
+        o["OpenDate"].notna()
+    )
+    if mask_open_put_sell.any():
+        add_df = o.loc[mask_open_put_sell, ["OpenDate", "Strike", "Qty"]].copy()
+        add_df["Date"] = add_df["OpenDate"].dt.date
+        add_df["DeltaCollateral"] = (add_df["Strike"] * 100.0 * add_df["Qty"]).astype(float)
+        events.append(add_df[["Date", "DeltaCollateral"]])
+
+    # Alla chiusura (qualsiasi status != OPEN) rimuovo vincolo
+    mask_close_put = (
+        (o["Type"] == "PUT") &
+        (o["Qty"] > 0) &
+        (o["Status"] != "OPEN") &
+        o["CloseDate"].notna()
+    )
+    if mask_close_put.any():
+        rel_df = o.loc[mask_close_put, ["CloseDate", "Strike", "Qty"]].copy()
+        rel_df["Date"] = rel_df["CloseDate"].dt.date
+        rel_df["DeltaCollateral"] = -(rel_df["Strike"] * 100.0 * rel_df["Qty"]).astype(float)
+        events.append(rel_df[["Date", "DeltaCollateral"]])
+
+    if not events:
+        return pd.DataFrame(columns=cols + ["CollateralOutstanding"])
+
+    ev = pd.concat(events, ignore_index=True)
+    ev = (ev.groupby("Date", as_index=False)["DeltaCollateral"]
+            .sum()
+            .sort_values("Date")
+            .reset_index(drop=True))
+    ev["CollateralOutstanding"] = ev["DeltaCollateral"].cumsum()
+    # garantisco non negatività (robusto se input incoerente)
+    ev["CollateralOutstanding"] = ev["CollateralOutstanding"].clip(lower=0.0)
+    return ev[["Date", "DeltaCollateral", "CollateralOutstanding"]]
+
+
+# ------------------------------------------------------------
+# RENDER
+# ------------------------------------------------------------
+def render_dashboard(settings: dict):
     st.subheader("Dashboard")
-    
+
+    # --- Load base tables
     orders = load_table(config.ORDERS_CSV, [])
     positions = load_table(config.POSITIONS_CSV, [])
     realized = load_table(config.REALIZED_CSV, [])
-    
-    # Calcola market value
+
+    # --- Market Value (azioni)
     p = positions_nonzero(positions)
     if p.empty:
         market_value = 0.0
-        comp = pd.DataFrame(columns=["Underlying","Qty","AvgCost","Last","MarketValue"])
+        comp = pd.DataFrame(columns=["Underlying", "Qty", "AvgCost", "Last", "MarketValue"])
     else:
         comp = p.copy()
         comp["Underlying"] = comp["Underlying"].astype(str).map(clean_ticker)
+        comp["Qty"] = pd.to_numeric(comp["Qty"], errors="coerce").fillna(0).astype(int)
+        comp["AvgCost"] = pd.to_numeric(comp["AvgCost"], errors="coerce").fillna(0.0)
         comp["Last"] = comp["Underlying"].apply(lambda u: get_price_for(u) or 0.0)
         comp["MarketValue"] = (comp["Qty"] * comp["Last"]).astype(float)
         market_value = float(comp["MarketValue"].sum())
-    
-    # Calcola cash reale
-    real_cash_balance, total_premiums, csp_collateral, total_portfolio_value = calculate_real_cash_balance(settings, orders, realized, market_value)
-    
+
+    # --- Cashflows: ledger -> timeline (qui entrano i premi!)
+    start_cash = float(settings.get("starting_cash", config.DEFAULT_STARTING_CASH))
+    ledger, audit = build_cash_ledger_inventory_aware(orders, positions)
+    timeline = cash_timeline_df(ledger, start_cash)
+    current_cash = float(timeline["CumulativeCash"].iloc[-1]) if not timeline.empty else start_cash
+
+    # --- Collateral attivo su PUT aperte (istantaneo)
+    csp_collateral_now = calculate_csp_collateral(orders)
+
+    # --- Timeline collateral (per Unused Cash)
+    coll_tl = build_csp_collateral_timeline(orders)
+
+    # --- Merge: FreeCash = Cash (ledger) - Collateral
+    if not timeline.empty or not coll_tl.empty:
+        free_tl = (
+            pd.merge(
+                timeline[["Date", "CumulativeCash"]] if not timeline.empty else pd.DataFrame({"Date": [], "CumulativeCash": []}),
+                coll_tl[["Date", "CollateralOutstanding"]] if not coll_tl.empty else pd.DataFrame({"Date": [], "CollateralOutstanding": []}),
+                on="Date",
+                how="outer",
+            )
+            .sort_values("Date")
+            .reset_index(drop=True)
+        )
+        free_tl["CumulativeCash"] = free_tl["CumulativeCash"].ffill().fillna(start_cash)
+        free_tl["CollateralOutstanding"] = free_tl["CollateralOutstanding"].ffill().fillna(0.0)
+        free_tl["FreeCash"] = free_tl["CumulativeCash"] - free_tl["CollateralOutstanding"]
+    else:
+        free_tl = pd.DataFrame(columns=["Date", "CumulativeCash", "CollateralOutstanding", "FreeCash"])
+
+    # --- Realized (ricostruito)
+    _real = rebuild_realized_from_orders(orders)
+    realized_total = float(_real["TotalPL"].sum()) if not _real.empty else 0.0
+
+    # --- Portfolio value (no doppio conteggio del collateral)
+    # Portafoglio = Cash (ledger) + Market Value azioni
+    portfolio_value_now = current_cash + market_value
+
+    # =========================
+    # Maintenance tools
+    # =========================
     with st.expander("Maintenance"):
         col1, col2 = st.columns(2)
-        
         with col1:
             if st.button("Rebuild realized from orders"):
-                _real = rebuild_realized_from_orders(orders)
-                save_table(_real, config.REALIZED_CSV)
+                _real_b = rebuild_realized_from_orders(orders)
+                save_table(_real_b, config.REALIZED_CSV)
                 st.success("Realized ricostruito e salvato da orders.")
                 st.rerun()
-        
+
         with col2:
             if st.button("💀 RESET DATABASE", type="secondary"):
-                empty_orders = pd.DataFrame(columns=[
-                    "ID", "Underlying", "Side", "Type", "OpenDate", "Expiry", 
-                    "Strike", "Qty", "PricePerContract", "Fees", "Delta", 
-                    "Notes", "Status", "CloseDate"
-                ])
+                empty_orders = pd.DataFrame(
+                    columns=[
+                        "ID","Underlying","Side","Type","OpenDate","Expiry","Strike",
+                        "Qty","PricePerContract","Fees","Delta","Notes","Status","CloseDate"
+                    ]
+                )
                 empty_positions = pd.DataFrame(columns=["Underlying", "Qty", "AvgCost"])
-                empty_realized = pd.DataFrame(columns=[
-                    "Underlying", "Event", "EventDate", "Shares", "Strike", 
-                    "PremiumPerShare", "AvgCostAtEvent", "EquityPL", "TotalPL", "Notes"
-                ])
-                
+                empty_realized = pd.DataFrame(
+                    columns=[
+                        "Underlying","Event","EventDate","Shares","Strike",
+                        "PremiumPerShare","AvgCostAtEvent","EquityPL","TotalPL","Notes"
+                    ]
+                )
                 save_table(empty_orders, config.ORDERS_CSV)
                 save_table(empty_positions, config.POSITIONS_CSV)
                 save_table(empty_realized, config.REALIZED_CSV)
-                
                 st.error("🗑️ DATABASE RESETTATO!")
                 st.rerun()
 
     st.markdown("---")
     st.subheader("Cashflows")
 
-    ledger, audit = build_cash_ledger_inventory_aware(orders, positions)
-    start_cash = float(settings.get("starting_cash", 0.0))
-    timeline = cash_timeline_df(ledger, start_cash)
-    
-    colL, colR = st.columns([1, 1])
-    
+    # =========================
+    # Cashflows (ledger + timeline)
+    # =========================
+    colL, colR = st.columns(2)
+
     with colL:
         with st.expander("Cash ledger (inventory-aware)", expanded=False):
             display_ledger = ledger.copy()
-            if "CashFlow" in display_ledger.columns:
+            if not display_ledger.empty and "CashFlow" in display_ledger.columns:
                 display_ledger["CashFlow"] = display_ledger["CashFlow"].apply(format_currency)
-            
-            st.dataframe(display_ledger, use_container_width=True)
+            st.dataframe(display_ledger, width="stretch")
 
         with st.expander("Audit shares balance", expanded=False):
-            display_audit = audit.copy()
-            if "CashFlow" in display_audit.columns:
-                display_audit["CashFlow"] = display_audit["CashFlow"].apply(format_currency)
-            st.dataframe(display_audit, use_container_width=True)
+            st.dataframe(audit, width="stretch")
 
     with colR:
-        st.caption("Cash Balance Reale - Con Gestione Collateral")
-        
-        # Usa la timeline calcolata dalla nuova logica di analytics.py
-        if not timeline.empty:
-            # Calcola l'ultimo valore del cash balance
-            last_cash = timeline['CumulativeCash'].iloc[-1] if not timeline.empty else start_cash
-            
-            st.metric("Cash Balance Attuale", format_currency(last_cash), 
-                     delta=format_currency(last_cash - start_cash))
-            
-            # Crea il grafico con la timeline corretta
+        st.caption("Unused cash (Cash − Collateral PUT)")
+        last_free = float(free_tl["FreeCash"].iloc[-1]) if not free_tl.empty else current_cash
+        st.metric("Cash disponibile", format_currency(last_free))
+
+        if not free_tl.empty:
             chart = (
-                alt.Chart(timeline)
-                .mark_line(point=True, color='green')
+                alt.Chart(free_tl)
+                .mark_line(point=True)
                 .encode(
                     x=alt.X("Date:T", title="Data"),
-                    y=alt.Y("CumulativeCash:Q", title="Cash Balance ($)"),
+                    y=alt.Y("FreeCash:Q", title="Unused Cash"),
                     tooltip=[
                         alt.Tooltip("Date:T", title="Data"),
-                        alt.Tooltip("DailyFlow:Q", title="Daily Flow", format=",.2f"),
-                        alt.Tooltip("CumulativeCash:Q", title="Cash Balance", format=",.2f"),
+                        alt.Tooltip("FreeCash:Q", title="Free Cash", format=",.2f"),
+                        alt.Tooltip("CumulativeCash:Q", title="Cash lordo", format=",.2f"),
+                        alt.Tooltip("CollateralOutstanding:Q", title="Collateral", format=",.2f"),
                     ],
                 )
                 .properties(height=300)
             )
-            
-            # Aggiungi linea dello zero per riferimento
-            zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(strokeDash=[5,5], color='red').encode(y='y:Q')
-            
-            st.altair_chart(chart + zero_line, use_container_width=True)
-            
-            # Mostra dettagli della timeline
+            zero_line = (
+                alt.Chart(pd.DataFrame({"y": [0]}))
+                .mark_rule(strokeDash=[5, 5], color="red")
+                .encode(y="y:Q")
+            )
+            st.altair_chart(chart + zero_line)
             with st.expander("Dettagli Timeline Cash", expanded=False):
-                display_timeline = timeline.copy()
-                display_timeline["DailyFlow"] = display_timeline["DailyFlow"].apply(format_currency)
-                display_timeline["CumulativeCash"] = display_timeline["CumulativeCash"].apply(format_currency)
-                st.dataframe(display_timeline, use_container_width=True)
+                display_tl = free_tl.copy()
+                display_tl["FreeCash"] = display_tl["FreeCash"].apply(format_currency)
+                display_tl["CumulativeCash"] = display_tl["CumulativeCash"].apply(format_currency)
+                display_tl["CollateralOutstanding"] = display_tl["CollateralOutstanding"].apply(format_currency)
+                st.dataframe(display_tl, width="stretch")
         else:
-            st.metric("Cash Balance", format_currency(start_cash))
-            st.caption("No cash flow events yet - Using starting cash")
+            st.caption("Nessun evento di cassa ancora — uso lo starting cash.")
 
-    # Overview metrics - Ricalcolate per coerenza
-    _real = rebuild_realized_from_orders(orders)
-    realized_total = float(_real["TotalPL"].sum()) if not _real.empty else 0.0
-    
-    # Usa il cash balance dalla timeline invece del calcolo vecchio
-    current_cash_balance = timeline['CumulativeCash'].iloc[-1] if not timeline.empty else start_cash
-    portfolio_value_now = current_cash_balance + market_value + csp_collateral
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Cash Balance", format_currency(current_cash_balance))
+    # =========================
+    # Overview metrics coerenti
+    # =========================
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Cash Balance (lordo)", format_currency(current_cash))
     c2.metric("Mkt. value positions", format_currency(market_value))
-    c3.metric("CSP Collateral", format_currency(csp_collateral))
+    c3.metric("CSP Collateral (vincolo)", format_currency(csp_collateral_now))
     c4.metric("Total Portfolio Value", format_currency(portfolio_value_now))
+    c5.metric("Cash disponibile", format_currency(last_free))
 
-    # Verifica della coerenza
-    st.info(f"**Verifica Portafoglio:** {format_currency(current_cash_balance)} (Cash) + {format_currency(market_value)} (Positions) + {format_currency(csp_collateral)} (Collateral) = {format_currency(portfolio_value_now)}")
+    st.info(
+        f"**Verifica:** {format_currency(current_cash)} (Cash lordo) + "
+        f"{format_currency(market_value)} (Mkt Value) = "
+        f"{format_currency(portfolio_value_now)} (Totale).  "
+        f"Collateral PUT attivo: {format_currency(csp_collateral_now)}.  "
+        f"Cash disponibile = Cash − Collateral = {format_currency(last_free)}."
+    )
 
-    # Realized P/L separato
+    # =========================
+    # Realized & Premiums (info)
+    # =========================
     r1, r2 = st.columns(2)
     with r1:
-        st.metric("Realized Gain/Loss", format_currency(realized_total),
-                 delta=format_currency(realized_total))
+        st.metric("Realized Gain/Loss (rebuilt)", format_currency(realized_total))
     with r2:
-        total_premiums_collected = (orders[orders['Side'].str.upper() == 'SELL']['PricePerContract'] * 100 * orders[orders['Side'].str.upper() == 'SELL']['Qty']).sum()
-        st.metric("Total Premiums Collected", format_currency(total_premiums_collected))
+        sold = orders.copy()
+        if not sold.empty:
+            sold["Side"] = sold["Side"].astype(str).str.upper()
+            sold["PricePerContract"] = pd.to_numeric(sold["PricePerContract"], errors="coerce").fillna(0.0)
+            sold["Qty"] = pd.to_numeric(sold["Qty"], errors="coerce").fillna(0).astype(int)
+            total_premiums = float(
+                (sold[sold["Side"] == "SELL"]["PricePerContract"] * 100.0 * sold[sold["Side"] == "SELL"]["Qty"]).sum()
+            )
+        else:
+            total_premiums = 0.0
+        st.metric("Total Premiums Collected (lifetime)", format_currency(total_premiums))
 
+    # =========================
     # Positions
+    # =========================
     st.markdown("---")
     st.subheader("Positions")
     if p.empty:
-        st.info("No positions.")
+        st.info("No active positions.")
     else:
         display_comp = comp.copy()
         display_comp["AvgCost"] = display_comp["AvgCost"].apply(format_currency)
         display_comp["Last"] = display_comp["Last"].apply(format_currency)
         display_comp["MarketValue"] = display_comp["MarketValue"].apply(format_currency)
-        
+
         st.dataframe(
             display_comp[["Underlying", "Qty", "AvgCost", "Last", "MarketValue"]]
-              .sort_values("MarketValue", ascending=False)
-              .rename(columns={
-                  "Underlying":"Ticker","Qty":"Shares","AvgCost":"Avg Cost",
-                  "Last":"Last","MarketValue":"Value"
-              }),
-            use_container_width=True,
+            .sort_values("MarketValue", ascending=False)
+            .rename(
+                columns={
+                    "Underlying": "Ticker",
+                    "Qty": "Shares",
+                    "AvgCost": "Avg Cost",
+                    "Last": "Last",
+                    "MarketValue": "Value",
+                }
+            ),
+            width="stretch",
         )
 
-    # Market prices section
+    # =========================
+    # Market prices utilities
+    # =========================
     st.markdown("---")
     st.subheader("Market Prices")
 
     all_ul = (
-        sorted(positions_nonzero(positions)["Underlying"].astype(str).map(clean_ticker).unique().tolist())
+        sorted(
+            positions_nonzero(positions)["Underlying"]
+            .astype(str)
+            .map(clean_ticker)
+            .unique()
+            .tolist()
+        )
         if not positions.empty and "Underlying" in positions.columns
         else []
     )
@@ -242,37 +370,34 @@ def render_dashboard(settings):
                         st.success(f"Updated {len(fetched)} ticker (IBKR).")
                         st.rerun()
 
-        # Mostra i prezzi correnti
         with st.expander("Current Prices", expanded=False):
-            price_data = []
+            price_rows = []
             for ul in all_ul:
-                current_price = get_price_for(ul) or 0.0
-                price_data.append({
-                    "Ticker": ul,
-                    "Current Price": format_currency(current_price)
-                })
-            if price_data:
-                st.dataframe(pd.DataFrame(price_data), use_container_width=True)
+                price_rows.append(
+                    {"Ticker": ul, "Current Price": format_currency(get_price_for(ul) or 0.0)}
+                )
+            st.dataframe(pd.DataFrame(price_rows), width="stretch")
 
-    # Debug Realized Gain
-    with st.expander("Debug Realized Gain", expanded=False):
-        st.write("Realized calcolato:", format_currency(realized_total))
-        if not _real.empty:
-            st.dataframe(_real)
+    # =========================
+    # Debug
+    # =========================
+    with st.expander("Debug Realized (rebuilt)", expanded=False):
+        if _real.empty:
+            st.caption("Nessun realized generato.")
+        else:
+            st.dataframe(_real, width="stretch")
 
-    # Debug Orders Status
     with st.expander("Debug Orders Status", expanded=False):
         if not orders.empty:
-            status_counts = orders['Status'].value_counts()
+            status_counts = orders["Status"].value_counts(dropna=False)
             st.write("Orders by status:")
             for status, count in status_counts.items():
                 st.write(f"- {status}: {count}")
-            
-            # Mostra PUT aperti con collateral
+
             open_puts = orders[
-                (orders['Type'].str.upper() == 'PUT') & 
-                (orders['Status'].str.upper() == 'OPEN')
-            ]
+                (orders["Type"].astype(str).str.upper() == "PUT")
+                & (orders["Status"].astype(str).str.upper() == "OPEN")
+            ][["ID", "Underlying", "Strike", "Qty", "Expiry"]]
             if not open_puts.empty:
                 st.write("Open PUTs (active collateral):")
-                st.dataframe(open_puts[['ID', 'Underlying', 'Strike', 'Qty', 'Expiry']], use_container_width=True)
+                st.dataframe(open_puts, width="stretch")
