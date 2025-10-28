@@ -1,0 +1,19 @@
+{
+  "starting_cash": 1184290.0,
+  "host": "127.0.0.1",
+  "port": 7497,
+  "client_id": 1,
+  "ibkr_host": "127.0.0.1",
+  "ibkr_port": 7496,
+  "ibkr_client_id": 2,
+  "ibkr_exchange_hints": {
+    "ELF": "NYSE",
+    "AMZN": "NASDAQ",
+    "ANET": "NYSE",
+    "NVO": "NYSE",
+    "QQQ": "NASDAQ",
+    "SOFI": "NASDAQ",
+    "UNH": "NYSE",
+    "NFLX": "NYSE"
+  }
+}
