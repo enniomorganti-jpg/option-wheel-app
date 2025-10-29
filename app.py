@@ -224,41 +224,10 @@ with st.sidebar:
         help="Valore iniziale della cassa, salvato solo per questa sessione.",
     )
 
-    st.caption("Le impostazioni sono temporanee e isolate per ogni utente.")
     st.markdown("---")
 
 
 
-    st.subheader("Exchange preferences")
-    eh_symbol = st.text_input("Ticker").strip().upper()
-    eh_exchange = st.selectbox("Preferred Exchange", ["NYSE", "NASDAQ", "ARCA", "SMART"])
-
-    colh1, colh2 = st.columns(2)
-    if colh1.button("Save hint"):
-        if eh_symbol and eh_exchange:
-            user_settings["ibkr_exchange_hints"][eh_symbol] = eh_exchange
-            st.success(f"Hint saved: {eh_symbol} → {eh_exchange}")
-        else:
-            st.warning("Inserisci un ticker e seleziona un exchange.")
-
-    if colh2.button("Remove hint"):
-        if eh_symbol in user_settings["ibkr_exchange_hints"]:
-            del user_settings["ibkr_exchange_hints"][eh_symbol]
-            st.success(f"Hint removed for {eh_symbol}.")
-        else:
-            st.info("No hint found for this ticker.")
-
-    hints = user_settings.get("ibkr_exchange_hints", {})
-    if hints:
-        st.caption("Current exchange preferences:")
-        st.dataframe(
-            pd.DataFrame([{"Ticker": k, "Exchange": v} for k, v in hints.items()]).sort_values("Ticker"),
-            width="stretch",
-            hide_index=True,
-        )
-
-    st.markdown("---")
-    st.subheader("Danger zone")
     if st.button("Erase ALL Data"):
         if st.checkbox("Confermo di voler cancellare tutti i dati"):
             wipe_all_data()
