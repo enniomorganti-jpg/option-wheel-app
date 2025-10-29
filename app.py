@@ -2,6 +2,7 @@
 import streamlit as st
 import asyncio
 import locale
+from assets.themes import apply_theme, THEMES
 from database import load_table, save_table, load_settings, save_settings, wipe_all_data
 from pricing import test_ibkr_connection, refresh_all_prices_yf, refresh_prices_ibkr, set_price_for, IB_AVAILABLE
 from utils import positions_nonzero, clean_ticker
@@ -33,6 +34,22 @@ st.title("Wheel accounting")
 
 # Sidebar
 with st.sidebar:
+
+
+    # Scelta tema (persistito nella sessione utente)
+    if "theme_choice" not in st.session_state:
+        st.session_state.theme_choice = "Verde Robinhood"
+
+    st.session_state.theme_choice = st.selectbox(
+        "Theme",
+        options=list(THEMES.keys()),
+        index=list(THEMES.keys()).index(st.session_state.theme_choice),
+        help="Seleziona un tema visivo dell'app."
+    )
+
+    # Applica il tema scelto
+    apply_theme(st.session_state.theme_choice)
+
     st.header("Settings")
     settings = load_settings()
     

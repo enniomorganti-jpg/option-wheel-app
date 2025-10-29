@@ -1,0 +1,111 @@
+# assets/themes.py
+
+import streamlit as st
+
+THEMES = {
+    "Verde Robinhood": {
+        "primary": "#00C805",
+        "background": "#F5F7F6",
+        "surface": "#FFFFFF",
+        "text": "#0B0D0C",
+        "muted": "#5F6C62",
+    },
+    "Blu BBVA": {
+        "primary": "#0B64C0",
+        "background": "#F6F8FB",
+        "surface": "#FFFFFF",
+        "text": "#0E1B2A",
+        "muted": "#6B7A90",
+    },
+    "Nero Generali": {
+        "primary": "#D0021B",   # rosso Generali come accento
+        "background": "#121212",
+        "surface": "#1E1E1E",
+        "text": "#EAEAEA",
+        "muted": "#A0A0A0",
+    },
+}
+
+def _css_from(palette: dict) -> str:
+    # Usiamo CSS variables per colorare app, sidebar, widget principali
+    return f"""
+    <style>
+      :root {{
+        --ow-primary: {palette['primary']};
+        --ow-bg: {palette['background']};
+        --ow-surface: {palette['surface']};
+        --ow-text: {palette['text']};
+        --ow-muted: {palette['muted']};
+      }}
+
+      /* App background + testo */
+      .stApp, .stApp [data-testid="stAppViewContainer"] {{
+        background: var(--ow-bg) !important;
+        color: var(--ow-text) !important;
+      }}
+
+      /* Header */
+      header[data-testid="stHeader"] {{
+        background: var(--ow-surface) !important;
+        border-bottom: 1px solid rgba(0,0,0,0.06);
+      }}
+
+      /* Sidebar */
+      [data-testid="stSidebar"] {{
+        background: var(--ow-surface) !important;
+        color: var(--ow-text) !important;
+        border-right: 1px solid rgba(0,0,0,0.06);
+      }}
+
+      /* Titoli */
+      .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4 {{
+        color: var(--ow-text) !important;
+      }}
+
+      /* Metric */
+      [data-testid="stMetric"] {{
+        background: var(--ow-surface) !important;
+        border: 1px solid rgba(0,0,0,0.05);
+        border-radius: 12px;
+        padding: 10px 12px;
+      }}
+
+      /* Buttons */
+      .stButton button, .stDownloadButton button {{
+        background: var(--ow-primary) !important;
+        color: #ffffff !important;
+        border: none !important;
+      }}
+      .stButton button:hover, .stDownloadButton button:hover {{
+        filter: brightness(0.95);
+      }}
+
+      /* Inputs focus */
+      .stTextInput input:focus, .stNumberInput input:focus, .stDateInput input:focus, .stSelectbox > div:focus {{
+        outline: 2px solid var(--ow-primary) !important;
+        box-shadow: 0 0 0 1px var(--ow-primary) inset !important;
+      }}
+
+      /* Dataframe wrapper (nuova API usa width='stretch', ma styling ok) */
+      div[data-testid="stDataFrameResizable"] {{
+        background: var(--ow-surface) !important;
+        border-radius: 10px;
+        border: 1px solid rgba(0,0,0,0.06);
+      }}
+
+      /* Expander */
+      details {{
+        background: var(--ow-surface) !important;
+        border: 1px solid rgba(0,0,0,0.06);
+        border-radius: 10px;
+        padding: .25rem .75rem;
+      }}
+      summary {{
+        color: var(--ow-text) !important;
+      }}
+    </style>
+    """
+
+def apply_theme(name: str):
+    palette = THEMES.get(name, list(THEMES.values())[0])
+    st.markdown(_css_from(palette), unsafe_allow_html=True)
