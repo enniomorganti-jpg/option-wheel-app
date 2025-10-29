@@ -42,8 +42,8 @@ except Exception:
 # =========================
 # App meta
 # =========================
-st.set_page_config(page_title="Wheel trackr", layout="wide")
-st.title("Trackr")
+st.set_page_config(page_title="Wheel tracker", layout="wide")
+st.title("Tracker")
 
 # --- TPV: dimensioni + colore agganciato al tema (centrato) ---
 st.markdown("""
