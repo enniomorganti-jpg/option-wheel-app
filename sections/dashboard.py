@@ -269,13 +269,7 @@ def render_dashboard(settings: dict):
     c4.metric("Total Portfolio Value", format_currency(portfolio_value_now))
     c5.metric("Cash disponibile", format_currency(last_free))
 
-    st.info(
-        f"**Verifica:** {format_currency(current_cash)} (Cash lordo) + "
-        f"{format_currency(market_value)} (Mkt Value) = "
-        f"{format_currency(portfolio_value_now)} (Totale).  "
-        f"Collateral PUT attivo: {format_currency(csp_collateral_now)}.  "
-        f"Cash disponibile = Cash − Collateral = {format_currency(last_free)}."
-    )
+
 
     # =========================
     # Realized & Premiums (info)
