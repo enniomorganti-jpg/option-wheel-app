@@ -204,7 +204,7 @@ with st.sidebar:
         st.stop()
 
     st.markdown("---")
-    st.header("Settings (personal session)")
+    st.header("Settings")
 
     if "user_settings" not in st.session_state:
         st.session_state.user_settings = {
