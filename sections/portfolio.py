@@ -95,6 +95,18 @@ def _fmt_pct_local(x):
 
 
 # ------------------------------
+# Helper robusto per date_input (anti-crash)
+# ------------------------------
+def _clamp_date(value: date | None, min_d: date | None, max_d: date | None) -> date:
+    v = value or date.today()
+    if min_d and v < min_d:
+        v = min_d
+    if max_d and v > max_d:
+        v = max_d
+    return v
+
+
+# ------------------------------
 # ACTION HANDLERS con DATA SCELTA
 # ------------------------------
 def _handle_put_expire(order_id, orders, action_date):
@@ -289,20 +301,47 @@ def render_portfolio():
             m3.write(f"**Annualized ROI:** {_fmt_pct_local(metrics['ann_roi'])}")
             m4.write(f"**Prob. ITM:** {_fmt_pct_local(metrics['prob_itm'])}")
 
-            # --- Date picker per l'azione ---
-            st.markdown("**Action date**")
+            # --- Issuance/Open date (retrodatare la vendita) ---
+            iss_col, act_col = st.columns([1, 1])
+
+            # default issuance = OpenDate se presente, altrimenti oggi (senza bound per retrodata)
+            iss_default = open_dt.date() if pd.notna(open_dt) else date.today()
+            new_open_date = iss_col.date_input(
+                "Issuance / Open date",
+                value=iss_default,
+                key=f"iss_{order_id}",
+            )
+            # salva eventuale modifica all'OpenDate
+            if new_open_date != iss_default and iss_col.button("Save issuance date", key=f"save_iss_{order_id}"):
+                orders.loc[orders["ID"] == order_id, "OpenDate"] = pd.to_datetime(new_open_date)
+                save_table(orders, "orders.csv")
+                st.success(f"Issuance/Open date updated to {new_open_date} for order {order_id}.")
+                st.rerun()
+
+            # --- Action date (anti-crash: clamp nei bound se forniti) ---
+
             # default = Expiry se c'è, altrimenti oggi
             default_action_date = expiry_dt.date() if pd.notna(expiry_dt) else date.today()
             min_date = open_dt.date() if pd.notna(open_dt) else None
             max_date = expiry_dt.date() if pd.notna(expiry_dt) else None
 
-            action_date = st.date_input(
-                "Set the action date",
-                value=default_action_date,
-                min_value=min_date,
-                max_value=max_date,
-                key=f"act_date_{order_id}"
-            )
+            safe_value = _clamp_date(default_action_date, min_date, max_date)
+
+            if (min_date is not None) and (max_date is not None) and (min_date <= max_date):
+                action_date = act_col.date_input(
+                    "Set the action date",
+                    value=safe_value,
+                    min_value=min_date,
+                    max_value=max_date,
+                    key=f"act_date_{order_id}"
+                )
+            else:
+                # se i bound non hanno senso (o expiry passato) non li imponiamo: niente crash
+                action_date = act_col.date_input(
+                    "Set the action date",
+                    value=safe_value,
+                    key=f"act_date_{order_id}"
+                )
 
             # --- Bottoni ---
             if is_open:
