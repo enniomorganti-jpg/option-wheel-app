@@ -260,7 +260,7 @@ with tab2:
 
     with st.form("new_order_form"):
         c1, c2, c3 = st.columns(3)
-        underlying = c1.text_input("Underlying", placeholder="AAPL").strip().upper()
+        underlying = c1.text_input("Underlying", placeholder="NVDA").strip().upper()
         option_type = c2.selectbox("Type", ["PUT", "CALL"])
         open_date = c3.date_input("Open Date")
 
