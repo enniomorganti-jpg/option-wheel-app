@@ -14,11 +14,8 @@ from utils import positions_nonzero, clean_ticker, format_currency
 from pricing import (
     get_price_for,
     set_price_for,
-    refresh_all_prices_yf,
-    refresh_prices_ibkr,
-    IB_AVAILABLE,
+    refresh_all_prices_yf,   # yfinance
 )
-
 
 # ------------------------------------------------------------
 # Helper: collateral su PUT aperte (valore istantaneo)
@@ -45,7 +42,6 @@ def calculate_csp_collateral(orders_df: pd.DataFrame) -> float:
 
 # ------------------------------------------------------------
 # Helper: timeline del collateral (cumulativo nel tempo)
-# Autocontenuto: non richiede altre funzioni esterne.
 # Regole:
 #  - all'OPEN di una PUT (side Sell) aggiungo +strike*100*qty
 #  - alla CLOSE (status != OPEN) rimuovo -strike*100*qty
@@ -168,14 +164,124 @@ def render_dashboard(settings: dict):
     _real = rebuild_realized_from_orders(orders)
     realized_total = float(_real["TotalPL"].sum()) if not _real.empty else 0.0
 
+    # --- Total premiums collected (lifetime)
+    sold = orders.copy()
+    if not sold.empty:
+        sold["Side"] = sold["Side"].astype(str).str.upper()
+        sold["PricePerContract"] = pd.to_numeric(sold["PricePerContract"], errors="coerce").fillna(0.0)
+        sold["Qty"] = pd.to_numeric(sold["Qty"], errors="coerce").fillna(0).astype(int)
+        total_premiums = float(
+            (sold[sold["Side"] == "SELL"]["PricePerContract"] * 100.0 * sold[sold["Side"] == "SELL"]["Qty"]).sum()
+        )
+    else:
+        total_premiums = 0.0
+
     # --- Portfolio value (no doppio conteggio del collateral)
     # Portafoglio = Cash (ledger) + Market Value azioni
     portfolio_value_now = current_cash + market_value
 
+    # ========================================================
+    # TOP: Total Portfolio Value (grande) + metriche richieste
+    # ========================================================
+    st.markdown(
+        f"""
+        <div style="font-size:1.8rem;font-weight:700;margin-bottom:0.25rem;">Total Portfolio Value</div>
+        <div style="font-size:2.2rem;font-weight:800;color:#072146;">{format_currency(portfolio_value_now)}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("Total premiums collected", format_currency(total_premiums))
+    with c2:
+        st.metric("Realized gain/loss", format_currency(realized_total))
+    with c3:
+        st.metric("Cash balance", format_currency(current_cash))
+    with c4:
+        st.metric("Mkt value positions", format_currency(market_value))
+    with c5:
+        st.metric("CSP collateral", format_currency(csp_collateral_now))
+
     # =========================
-    # Maintenance tools
+    # Cashflows + grafico
     # =========================
-    with st.expander("Maintenance"):
+    st.markdown("---")
+    st.subheader("Cashflows")
+
+    last_free = float(free_tl["FreeCash"].iloc[-1]) if not free_tl.empty else current_cash
+    if not free_tl.empty:
+        chart = (
+            alt.Chart(free_tl)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("FreeCash:Q", title="Free Cash"),
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Date"),
+                    alt.Tooltip("FreeCash:Q", title="Free Cash", format=",.2f"),
+                    alt.Tooltip("CumulativeCash:Q", title="Cash gross", format=",.2f"),
+                    alt.Tooltip("CollateralOutstanding:Q", title="Collateral", format=",.2f"),
+                ],
+            )
+            .properties(height=280)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.caption("Nessun evento di cassa ancora — uso lo starting cash.")
+
+    # =========================
+    # Dettagli: timeline cash + ledger + audit
+    # =========================
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.write("**Timeline Cash**")
+        st.dataframe(free_tl, width="stretch", height=260)
+    with d2:
+        st.write("**Cash Ledger (inventory aware)**")
+        st.dataframe(ledger, width="stretch", height=260)
+    with d3:
+        st.write("**Audit – Shares Balance**")
+        st.dataframe(audit, width="stretch", height=260)
+
+    # =========================
+    # Market prices (yfinance only)
+    # =========================
+    st.markdown("---")
+    st.subheader("Market Prices")
+
+    all_ul = (
+        sorted(
+            positions_nonzero(positions)["Underlying"]
+            .astype(str)
+            .map(clean_ticker)
+            .unique()
+            .tolist()
+        )
+        if not positions.empty and "Underlying" in positions.columns
+        else []
+    )
+
+    if not all_ul:
+        st.caption("No ticker in position.")
+    else:
+        if st.button("Update prices (yfinance)"):
+            with st.spinner("Updating prices with Yahoo..."):
+                fetched, errs = refresh_all_prices_yf(all_ul)
+                for ul, px in fetched.items():
+                    set_price_for(ul, px)
+            if fetched:
+                st.success(f"Updated {len(fetched)} ticker (Yahoo).")
+                st.rerun()
+
+        with st.expander("Current Prices", expanded=False):
+            price_rows = [{"Ticker": ul, "Current Price": format_currency(get_price_for(ul) or 0.0)} for ul in all_ul]
+            st.dataframe(pd.DataFrame(price_rows), width="stretch")
+
+    # =========================
+    # Maintenance (in fondo)
+    # =========================
+    st.markdown("---")
+    with st.expander("Maintenance", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Rebuild realized from orders"):
@@ -183,7 +289,6 @@ def render_dashboard(settings: dict):
                 save_table(_real_b, config.REALIZED_CSV)
                 st.success("Realized ricostruito e salvato da orders.")
                 st.rerun()
-
         with col2:
             if st.button("RESET DATABASE", type="secondary"):
                 empty_orders = pd.DataFrame(
@@ -204,194 +309,3 @@ def render_dashboard(settings: dict):
                 save_table(empty_realized, config.REALIZED_CSV)
                 st.error("DATABASE RESETTATO!")
                 st.rerun()
-
-    st.markdown("---")
-    st.subheader("Cashflows")
-
-    # =========================
-    # Cashflows (ledger + timeline)
-    # =========================
-    colL, colR = st.columns(2)
-
-    with colL:
-        with st.expander("Cash ledger (inventory-aware)", expanded=False):
-            display_ledger = ledger.copy()
-            if not display_ledger.empty and "CashFlow" in display_ledger.columns:
-                display_ledger["CashFlow"] = display_ledger["CashFlow"].apply(format_currency)
-            st.dataframe(display_ledger, width="stretch")
-
-        with st.expander("Audit shares balance", expanded=False):
-            st.dataframe(audit, width="stretch")
-
-    with colR:
-        st.caption("Unused cash (Cash − Collateral PUT)")
-        last_free = float(free_tl["FreeCash"].iloc[-1]) if not free_tl.empty else current_cash
-        st.metric("Cash disponibile", format_currency(last_free))
-
-        if not free_tl.empty:
-            chart = (
-                alt.Chart(free_tl)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("Date:T", title="Data"),
-                    y=alt.Y("FreeCash:Q", title="Unused Cash"),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Data"),
-                        alt.Tooltip("FreeCash:Q", title="Free Cash", format=",.2f"),
-                        alt.Tooltip("CumulativeCash:Q", title="Cash lordo", format=",.2f"),
-                        alt.Tooltip("CollateralOutstanding:Q", title="Collateral", format=",.2f"),
-                    ],
-                )
-                .properties(height=300)
-            )
-            zero_line = (
-                alt.Chart(pd.DataFrame({"y": [0]}))
-                .mark_rule(strokeDash=[5, 5], color="red")
-                .encode(y="y:Q")
-            )
-            st.altair_chart(chart + zero_line)
-            with st.expander("Dettagli Timeline Cash", expanded=False):
-                display_tl = free_tl.copy()
-                display_tl["FreeCash"] = display_tl["FreeCash"].apply(format_currency)
-                display_tl["CumulativeCash"] = display_tl["CumulativeCash"].apply(format_currency)
-                display_tl["CollateralOutstanding"] = display_tl["CollateralOutstanding"].apply(format_currency)
-                st.dataframe(display_tl, width="stretch")
-        else:
-            st.caption("Nessun evento di cassa ancora — uso lo starting cash.")
-
-    # =========================
-    # Overview metrics coerenti
-    # =========================
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Cash Balance (lordo)", format_currency(current_cash))
-    c2.metric("Mkt. value positions", format_currency(market_value))
-    c3.metric("CSP Collateral (vincolo)", format_currency(csp_collateral_now))
-    c4.metric("Total Portfolio Value", format_currency(portfolio_value_now))
-    c5.metric("Cash disponibile", format_currency(last_free))
-
-
-
-    # =========================
-    # Realized & Premiums (info)
-    # =========================
-    r1, r2 = st.columns(2)
-    with r1:
-        st.metric("Realized Gain/Loss (rebuilt)", format_currency(realized_total))
-    with r2:
-        sold = orders.copy()
-        if not sold.empty:
-            sold["Side"] = sold["Side"].astype(str).str.upper()
-            sold["PricePerContract"] = pd.to_numeric(sold["PricePerContract"], errors="coerce").fillna(0.0)
-            sold["Qty"] = pd.to_numeric(sold["Qty"], errors="coerce").fillna(0).astype(int)
-            total_premiums = float(
-                (sold[sold["Side"] == "SELL"]["PricePerContract"] * 100.0 * sold[sold["Side"] == "SELL"]["Qty"]).sum()
-            )
-        else:
-            total_premiums = 0.0
-        st.metric("Total Premiums Collected (lifetime)", format_currency(total_premiums))
-
-    # =========================
-    # Positions
-    # =========================
-    st.markdown("---")
-    st.subheader("Positions")
-    if p.empty:
-        st.info("No active positions.")
-    else:
-        display_comp = comp.copy()
-        display_comp["AvgCost"] = display_comp["AvgCost"].apply(format_currency)
-        display_comp["Last"] = display_comp["Last"].apply(format_currency)
-        display_comp["MarketValue"] = display_comp["MarketValue"].apply(format_currency)
-
-        st.dataframe(
-            display_comp[["Underlying", "Qty", "AvgCost", "Last", "MarketValue"]]
-            .sort_values("MarketValue", ascending=False)
-            .rename(
-                columns={
-                    "Underlying": "Ticker",
-                    "Qty": "Shares",
-                    "AvgCost": "Avg Cost",
-                    "Last": "Last",
-                    "MarketValue": "Value",
-                }
-            ),
-            width="stretch",
-        )
-
-    # =========================
-    # Market prices utilities
-    # =========================
-    st.markdown("---")
-    st.subheader("Market Prices")
-
-    all_ul = (
-        sorted(
-            positions_nonzero(positions)["Underlying"]
-            .astype(str)
-            .map(clean_ticker)
-            .unique()
-            .tolist()
-        )
-        if not positions.empty and "Underlying" in positions.columns
-        else []
-    )
-
-    if not all_ul:
-        st.caption("No ticker in position.")
-    else:
-        colA, colB = st.columns(2)
-
-        with colA:
-            if st.button("Update prices (yfinance)"):
-                with st.spinner("Updating prices with Yahoo..."):
-                    fetched, errs = refresh_all_prices_yf(all_ul)
-                    for ul, px in fetched.items():
-                        set_price_for(ul, px)
-                if fetched:
-                    st.success(f"Updated {len(fetched)} ticker (Yahoo).")
-                    st.rerun()
-
-        with colB:
-            if st.button("Update prices (IBKR)"):
-                if not IB_AVAILABLE:
-                    st.error("ib_insync not installed.")
-                else:
-                    with st.spinner("Connection to IBKR..."):
-                        fetched, errs = refresh_prices_ibkr(all_ul)
-                        for ul, px in fetched.items():
-                            set_price_for(ul, px)
-                    if fetched:
-                        st.success(f"Updated {len(fetched)} ticker (IBKR).")
-                        st.rerun()
-
-        with st.expander("Current Prices", expanded=False):
-            price_rows = []
-            for ul in all_ul:
-                price_rows.append(
-                    {"Ticker": ul, "Current Price": format_currency(get_price_for(ul) or 0.0)}
-                )
-            st.dataframe(pd.DataFrame(price_rows), width="stretch")
-
-    # =========================
-    # Debug
-    # =========================
-    with st.expander("Debug Realized (rebuilt)", expanded=False):
-        if _real.empty:
-            st.caption("Nessun realized generato.")
-        else:
-            st.dataframe(_real, width="stretch")
-
-    with st.expander("Debug Orders Status", expanded=False):
-        if not orders.empty:
-            status_counts = orders["Status"].value_counts(dropna=False)
-            st.write("Orders by status:")
-            for status, count in status_counts.items():
-                st.write(f"- {status}: {count}")
-
-            open_puts = orders[
-                (orders["Type"].astype(str).str.upper() == "PUT")
-                & (orders["Status"].astype(str).str.upper() == "OPEN")
-            ][["ID", "Underlying", "Strike", "Qty", "Expiry"]]
-            if not open_puts.empty:
-                st.write("Open PUTs (active collateral):")
-                st.dataframe(open_puts, width="stretch")
