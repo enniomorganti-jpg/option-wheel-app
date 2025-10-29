@@ -3,7 +3,9 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import locale
+import pyrebase
 
+import database
 from database import load_table, save_table, wipe_all_data
 from pricing import test_ibkr_connection, IB_AVAILABLE
 from utils import positions_nonzero, clean_ticker
@@ -42,13 +44,93 @@ except Exception:
 st.set_page_config(page_title="Option Wheel Strategy", layout="wide")
 st.title("Wheel accounting")
 
+_PYREBASE_APP = None
+
+
+def _init_pyrebase_app():
+    global _PYREBASE_APP
+    if _PYREBASE_APP is not None:
+        return _PYREBASE_APP
+    if "firebase" not in st.secrets:
+        raise RuntimeError("Firebase configuration missing in Streamlit secrets.")
+    firebase_config = {k: v for k, v in st.secrets["firebase"].items()}
+    _PYREBASE_APP = pyrebase.initialize_app(firebase_config)
+    return _PYREBASE_APP
+
+
+def _firebase_auth():
+    try:
+        return _init_pyrebase_app().auth()
+    except Exception as exc:
+        st.sidebar.error(f"Impossibile inizializzare Firebase: {exc}")
+        st.stop()
+
+
+def _format_auth_error(exc: Exception) -> str:
+    message = str(exc)
+    if hasattr(exc, "args") and exc.args:
+        for arg in exc.args:
+            if isinstance(arg, dict):
+                message = arg.get("error", {}).get("message", message)
+            elif isinstance(arg, str):
+                message = arg
+    return message.replace("_", " ")
+
 # =========================
 # Sidebar (session-based)
 # =========================
 with st.sidebar:
+    st.header("Account")
+    auth = _firebase_auth()
+    current_user = st.session_state.get("user")
+
+    if current_user:
+        database.set_current_user(current_user["uid"])
+        st.success(f"Logged in as {current_user.get('email', 'utente')}")
+        if st.button("Logout"):
+            st.session_state.user = None
+            database.set_current_user(None)
+            st.rerun()
+    else:
+        st.caption("Accedi o crea un account per sincronizzare i dati della ruota.")
+        auth_mode = st.radio("Azione", ["Login", "Signup"], horizontal=True, key="auth_mode")
+        with st.form("auth_form"):
+            email = st.text_input("Email", key="auth_email").strip()
+            password = st.text_input("Password", type="password", key="auth_password")
+            confirm = None
+            if auth_mode == "Signup":
+                confirm = st.text_input("Conferma Password", type="password", key="auth_password_confirm")
+            submit = st.form_submit_button("Login" if auth_mode == "Login" else "Crea account")
+
+        if submit:
+            if not email or not password:
+                st.warning("Inserisci email e password.")
+            elif auth_mode == "Signup" and password != (confirm or ""):
+                st.warning("Le password non coincidono.")
+            else:
+                try:
+                    if auth_mode == "Signup":
+                        auth.create_user_with_email_and_password(email, password)
+                    user_creds = auth.sign_in_with_email_and_password(email, password)
+                    st.session_state.user = {
+                        "uid": user_creds.get("localId"),
+                        "email": user_creds.get("email", email),
+                        "idToken": user_creds.get("idToken"),
+                    }
+                    database.set_current_user(st.session_state.user["uid"])
+                    st.success("Autenticazione completata.")
+                    st.rerun()
+                except Exception as exc:
+                    message = _format_auth_error(exc)
+                    st.error(f"Autenticazione fallita: {message}")
+
+    if "user" not in st.session_state or st.session_state.user is None:
+        st.info("Efettua il login per continuare.")
+        st.stop()
+
+    st.markdown("---")
     st.header("Settings (personal session)")
 
-    # Stato persistente per la sessione corrente dell'utente
     if "user_settings" not in st.session_state:
         st.session_state.user_settings = {
             "starting_cash": float(config.DEFAULT_STARTING_CASH),
@@ -60,7 +142,6 @@ with st.sidebar:
 
     user_settings = st.session_state.user_settings
 
-    # Starting capital (solo sessione corrente)
     user_settings["starting_cash"] = st.number_input(
         "Starting capital",
         value=float(user_settings["starting_cash"]),
@@ -71,7 +152,6 @@ with st.sidebar:
     st.caption("Le impostazioni sono temporanee e isolate per ogni utente.")
     st.markdown("---")
 
-    # IBKR (solo sessione)
     st.subheader("IBKR Connection")
     user_settings["ibkr_host"] = st.text_input("Host", value=user_settings["ibkr_host"])
     user_settings["ibkr_port"] = st.number_input("Port", value=int(user_settings["ibkr_port"]))
@@ -90,7 +170,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Exchange hints (solo sessione)
     st.subheader("Exchange preferences")
     eh_symbol = st.text_input("Ticker").strip().upper()
     eh_exchange = st.selectbox("Preferred Exchange", ["NYSE", "NASDAQ", "ARCA", "SMART"])
