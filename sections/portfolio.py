@@ -1,7 +1,7 @@
 # sections/portfolio.py
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 
 from database import load_table, save_table
 from utils import clean_ticker, format_currency
@@ -95,15 +95,48 @@ def _fmt_pct_local(x):
 
 
 # ------------------------------
-# Helper robusto per date_input (anti-crash)
+# Date input robusti (anti-crash Cloud)
 # ------------------------------
-def _clamp_date(value: date | None, min_d: date | None, max_d: date | None) -> date:
-    v = value or date.today()
-    if min_d and v < min_d:
-        v = min_d
-    if max_d and v > max_d:
-        v = max_d
-    return v
+def _to_pydate(x):
+    """Converte qualsiasi input (Timestamp/str/datetime) in datetime.date oppure None."""
+    if x is None:
+        return None
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    try:
+        xd = pd.to_datetime(x, errors="coerce")
+        if pd.isna(xd):
+            return None
+        return xd.date()
+    except Exception:
+        return None
+
+
+def safe_date_input(label: str, value, min_value=None, max_value=None, key=None):
+    """
+    st.date_input robusto:
+    - coercizza a date
+    - se min>max rimuove i bound
+    - clamp del value dentro i limiti
+    """
+    v = _to_pydate(value) or date.today()
+    mn = _to_pydate(min_value)
+    mx = _to_pydate(max_value)
+
+    if mn and mx and mn > mx:
+        mn, mx = None, None
+
+    if mn and v < mn:
+        v = mn
+    if mx and v > mx:
+        v = mx
+
+    kwargs = {"label": label, "value": v, "key": key}
+    if mn is not None:
+        kwargs["min_value"] = mn
+    if mx is not None:
+        kwargs["max_value"] = mx
+    return st.date_input(**kwargs)
 
 
 # ------------------------------
@@ -304,44 +337,31 @@ def render_portfolio():
             # --- Issuance/Open date (retrodatare la vendita) ---
             iss_col, act_col = st.columns([1, 1])
 
-            # default issuance = OpenDate se presente, altrimenti oggi (senza bound per retrodata)
-            iss_default = open_dt.date() if pd.notna(open_dt) else date.today()
-            new_open_date = iss_col.date_input(
+            iss_default = open_dt if pd.notna(open_dt) else date.today()
+            new_open_date = safe_date_input(
                 "Issuance / Open date",
                 value=iss_default,
                 key=f"iss_{order_id}",
             )
-            # salva eventuale modifica all'OpenDate
-            if new_open_date != iss_default and iss_col.button("Save issuance date", key=f"save_iss_{order_id}"):
-                orders.loc[orders["ID"] == order_id, "OpenDate"] = pd.to_datetime(new_open_date)
-                save_table(orders, "orders.csv")
-                st.success(f"Issuance/Open date updated to {new_open_date} for order {order_id}.")
-                st.rerun()
+            if (pd.notna(open_dt) and new_open_date != open_dt.date()) or (pd.isna(open_dt) and new_open_date is not None):
+                if iss_col.button("Save issuance date", key=f"save_iss_{order_id}"):
+                    orders.loc[orders["ID"] == order_id, "OpenDate"] = pd.to_datetime(new_open_date)
+                    save_table(orders, "orders.csv")
+                    st.success(f"Issuance/Open date updated to {new_open_date} for order {order_id}.")
+                    st.rerun()
 
-            # --- Action date (anti-crash: clamp nei bound se forniti) ---
+            # --- Action date (anti-crash, bound riparati + clamp) ---
+            default_action_date = expiry_dt if pd.notna(expiry_dt) else date.today()
+            min_date = open_dt if pd.notna(open_dt) else None
+            max_date = expiry_dt if pd.notna(expiry_dt) else None
 
-            # default = Expiry se c'è, altrimenti oggi
-            default_action_date = expiry_dt.date() if pd.notna(expiry_dt) else date.today()
-            min_date = open_dt.date() if pd.notna(open_dt) else None
-            max_date = expiry_dt.date() if pd.notna(expiry_dt) else None
-
-            safe_value = _clamp_date(default_action_date, min_date, max_date)
-
-            if (min_date is not None) and (max_date is not None) and (min_date <= max_date):
-                action_date = act_col.date_input(
-                    "Set the action date",
-                    value=safe_value,
-                    min_value=min_date,
-                    max_value=max_date,
-                    key=f"act_date_{order_id}"
-                )
-            else:
-                # se i bound non hanno senso (o expiry passato) non li imponiamo: niente crash
-                action_date = act_col.date_input(
-                    "Set the action date",
-                    value=safe_value,
-                    key=f"act_date_{order_id}"
-                )
+            action_date = safe_date_input(
+                "Set the action date",
+                value=default_action_date,
+                min_value=min_date,
+                max_value=max_date,
+                key=f"act_date_{order_id}",
+            )
 
             # --- Bottoni ---
             if is_open:
