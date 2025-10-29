@@ -366,4 +366,4 @@ with tab6:
 
 # Footer
 st.markdown("---")
-st.caption("Option Wheel Strategy Dashboard - Modular Version")
+st.caption("Option bookkeeper - developed by emorganti & abertobilack")
