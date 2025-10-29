@@ -184,23 +184,7 @@ with st.sidebar:
     st.caption("Le impostazioni sono temporanee e isolate per ogni utente.")
     st.markdown("---")
 
-    st.subheader("IBKR Connection")
-    user_settings["ibkr_host"] = st.text_input("Host", value=user_settings["ibkr_host"])
-    user_settings["ibkr_port"] = st.number_input("Port", value=int(user_settings["ibkr_port"]))
-    user_settings["ibkr_client_id"] = st.number_input("Client ID", value=int(user_settings["ibkr_client_id"]))
 
-    col1, col2 = st.columns(2)
-    if col1.button("Test IBKR Connection"):
-        ok, info = test_ibkr_connection()
-        if ok:
-            st.success(f"Connected. Accounts: {', '.join(info.get('accounts', [])) or 'N/A'}")
-        else:
-            st.error(f"Connection failed: {info.get('error', 'Unknown error')}")
-
-    if not IB_AVAILABLE:
-        st.warning("ib_insync non disponibile in questo ambiente.")
-
-    st.markdown("---")
 
     st.subheader("Exchange preferences")
     eh_symbol = st.text_input("Ticker").strip().upper()
