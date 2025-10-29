@@ -1,3 +1,4 @@
+
 # app.py
 import streamlit as st
 import pandas as pd
@@ -41,8 +42,50 @@ except Exception:
 # =========================
 # App meta
 # =========================
-st.set_page_config(page_title="Option Wheel Strategy", layout="wide")
-st.title("Options bookkeeper")
+st.set_page_config(page_title="Wheel Tracker", layout="wide")
+st.title("Tracker")
+
+# --- TPV: dimensioni + colore agganciato al tema (centrato) ---
+st.markdown("""
+<style>
+:root { 
+  --tpv: var(--primary-color, #0070C9); /* prende il colore del tema */
+}
+
+/* Contenitore centrato */
+.tpv-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;      /* centra orizzontalmente */
+  justify-content: center;
+  text-align: center;       /* testo centrato */
+  margin: 0.5rem 0 1.2rem 0;
+}
+
+/* Titolo: nero, senza bold */
+.tpv-title {
+  font-size: 1.6rem;
+  line-height: 1.5;
+  margin: 0 0 .25rem 0;
+  color: #000000 !important;
+  font-weight: 400;
+}
+
+/* Valore: più grande, azzurrino tema */
+.tpv-value {
+  font-size: 3.2rem;
+  line-height: 1.1;
+  color: var(--tpv);
+  font-weight: 400;
+}
+
+/* leggero boost su schermi grandi */
+@media (min-width: 1200px) {
+  .tpv-title { font-size: 1.7rem; }
+  .tpv-value { font-size: 3.4rem; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 _FIREBASE_CONFIG = st.secrets.get("firebase")
 
@@ -235,7 +278,7 @@ settings_session = {
 # Main tabs
 # =========================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    ["Dashboard", "New Order", "Portfolio", "Positions", "Modify Orders", "Analytics"]
+    ["Metrics", "New Order", "Portfolio", "Positions", "Modify Orders", "Analytics"]
 )
 
 with tab1:
