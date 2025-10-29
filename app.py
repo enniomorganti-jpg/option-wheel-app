@@ -42,7 +42,7 @@ except Exception:
 # App meta
 # =========================
 st.set_page_config(page_title="Option Wheel Strategy", layout="wide")
-st.title("Wheel accounting")
+st.title("Options bookkeeper")
 
 _FIREBASE_CONFIG = st.secrets.get("firebase")
 
