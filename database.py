@@ -43,9 +43,24 @@ def _norm_dates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _service_account_credentials() -> credentials.Certificate:
-    if "firebase_service_account" not in st.secrets:
+    if "firebase_service_account" in st.secrets:
+        raw_credentials = {k: v for k, v in st.secrets["firebase_service_account"].items()}
+    elif "firebase" in st.secrets:
+        fb = st.secrets["firebase"]
+        raw_credentials = {
+            "type": fb["type"],
+            "project_id": fb["project_id"],
+            "private_key_id": fb["private_key_id"],
+            "private_key": fb["private_key"].replace("\\n", "\n"),
+            "client_email": fb["client_email"],
+            "client_id": fb["client_id"],
+            "auth_uri": fb["auth_uri"],
+            "token_uri": fb["token_uri"],
+            "auth_provider_x509_cert_url": fb["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": fb["client_x509_cert_url"],
+        }
+    else:
         raise RuntimeError("Firebase service account non configurato nelle Streamlit secrets.")
-    raw_credentials = {k: v for k, v in st.secrets["firebase_service_account"].items()}
     return credentials.Certificate(raw_credentials)
 
 

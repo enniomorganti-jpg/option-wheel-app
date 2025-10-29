@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import locale
-import pyrebase
+import requests
 
 import database
 from database import load_table, save_table, wipe_all_data
@@ -44,87 +44,122 @@ except Exception:
 st.set_page_config(page_title="Option Wheel Strategy", layout="wide")
 st.title("Wheel accounting")
 
-_PYREBASE_APP = None
+_FIREBASE_CONFIG = st.secrets.get("firebase")
 
 
-def _init_pyrebase_app():
-    global _PYREBASE_APP
-    if _PYREBASE_APP is not None:
-        return _PYREBASE_APP
-    if "firebase" not in st.secrets:
+def _require_firebase_config():
+    if not _FIREBASE_CONFIG:
         raise RuntimeError("Firebase configuration missing in Streamlit secrets.")
-    firebase_config = {k: v for k, v in st.secrets["firebase"].items()}
-    _PYREBASE_APP = pyrebase.initialize_app(firebase_config)
-    return _PYREBASE_APP
 
 
-def _firebase_auth():
-    try:
-        return _init_pyrebase_app().auth()
-    except Exception as exc:
-        st.sidebar.error(f"Impossibile inizializzare Firebase: {exc}")
-        st.stop()
+def _firebase_api_key() -> str:
+    _require_firebase_config()
+    api_key = _FIREBASE_CONFIG.get("apiKey")
+    if not api_key:
+        raise RuntimeError("Firebase API key missing in secrets (firebase.apiKey)")
+    return api_key
 
 
-def _format_auth_error(exc: Exception) -> str:
+def _firebase_error_message(exc: Exception) -> str:
     message = str(exc)
-    if hasattr(exc, "args") and exc.args:
-        for arg in exc.args:
-            if isinstance(arg, dict):
-                message = arg.get("error", {}).get("message", message)
-            elif isinstance(arg, str):
-                message = arg
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        try:
+            data = exc.response.json()
+            message = data.get("error", {}).get("message", message)
+        except Exception:
+            if exc.response.text:
+                message = exc.response.text
     return message.replace("_", " ")
+
+
+def firebase_sign_up(email: str, password: str) -> dict:
+    api_key = _firebase_api_key()
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}"
+    response = requests.post(
+        url,
+        json={"email": email, "password": password, "returnSecureToken": True},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def firebase_sign_in(email: str, password: str) -> dict:
+    api_key = _firebase_api_key()
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
+    response = requests.post(
+        url,
+        json={"email": email, "password": password, "returnSecureToken": True},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
 
 # =========================
 # Sidebar (session-based)
 # =========================
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+
+def _set_database_user():
+    if st.session_state.user is None:
+        database.set_current_user(None)
+    else:
+        database.set_current_user(st.session_state.user["uid"])
+
+
+_set_database_user()
+
 with st.sidebar:
     st.header("Account")
-    auth = _firebase_auth()
-    current_user = st.session_state.get("user")
-
-    if current_user:
-        database.set_current_user(current_user["uid"])
-        st.success(f"Logged in as {current_user.get('email', 'utente')}")
-        if st.button("Logout"):
-            st.session_state.user = None
-            database.set_current_user(None)
-            st.rerun()
-    else:
+    if st.session_state.user is None:
         st.caption("Accedi o crea un account per sincronizzare i dati della ruota.")
-        auth_mode = st.radio("Azione", ["Login", "Signup"], horizontal=True, key="auth_mode")
-        with st.form("auth_form"):
-            email = st.text_input("Email", key="auth_email").strip()
-            password = st.text_input("Password", type="password", key="auth_password")
-            confirm = None
-            if auth_mode == "Signup":
-                confirm = st.text_input("Conferma Password", type="password", key="auth_password_confirm")
-            submit = st.form_submit_button("Login" if auth_mode == "Login" else "Crea account")
+        tab_login, tab_signup = st.tabs(["Login", "Registrati"])
 
-        if submit:
-            if not email or not password:
-                st.warning("Inserisci email e password.")
-            elif auth_mode == "Signup" and password != (confirm or ""):
-                st.warning("Le password non coincidono.")
-            else:
-                try:
-                    if auth_mode == "Signup":
-                        auth.create_user_with_email_and_password(email, password)
-                    user_creds = auth.sign_in_with_email_and_password(email, password)
-                    st.session_state.user = {
-                        "uid": user_creds.get("localId"),
-                        "email": user_creds.get("email", email),
-                        "idToken": user_creds.get("idToken"),
-                    }
-                    database.set_current_user(st.session_state.user["uid"])
-                    st.success("Autenticazione completata.")
-                    st.rerun()
-                except Exception as exc:
-                    message = _format_auth_error(exc)
-                    st.error(f"Autenticazione fallita: {message}")
+        with tab_login:
+            login_email = st.text_input("Email", key="login_email").strip()
+            login_password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Entra", key="login_submit"):
+                if not login_email or not login_password:
+                    st.warning("Inserisci email e password.")
+                else:
+                    try:
+                        creds = firebase_sign_in(login_email, login_password)
+                        st.session_state.user = {
+                            "uid": creds.get("localId"),
+                            "email": login_email,
+                            "idToken": creds.get("idToken"),
+                        }
+                        _set_database_user()
+                        st.success(f"Benvenuto, {login_email}")
+                        st.rerun()
+                    except Exception as exc:
+                        message = _firebase_error_message(exc)
+                        st.error(f"Login fallito: {message}")
 
-    if "user" not in st.session_state or st.session_state.user is None:
+        with tab_signup:
+            signup_email = st.text_input("Email", key="signup_email").strip()
+            signup_password = st.text_input("Password (min 6)", type="password", key="signup_password")
+            if st.button("Crea account", key="signup_submit"):
+                if not signup_email or not signup_password:
+                    st.warning("Inserisci email e password valide.")
+                else:
+                    try:
+                        firebase_sign_up(signup_email, signup_password)
+                        st.success("Account creato! Ora effettua il login.")
+                    except Exception as exc:
+                        message = _firebase_error_message(exc)
+                        st.error(f"Registrazione fallita: {message}")
+    else:
+        user_email = st.session_state.user.get("email", "utente")
+        st.write(f"Loggato come **{user_email}**")
+        if st.button("Esci", key="logout_button"):
+            st.session_state.user = None
+            _set_database_user()
+            st.rerun()
+
+    if st.session_state.user is None:
         st.info("Efettua il login per continuare.")
         st.stop()
 
