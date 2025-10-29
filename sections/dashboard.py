@@ -109,7 +109,6 @@ def build_csp_collateral_timeline(orders_df: pd.DataFrame) -> pd.DataFrame:
 # RENDER
 # ------------------------------------------------------------
 def render_dashboard(settings: dict):
-    st.subheader("Dashboard")
 
     # --- Load base tables
     orders = load_table(config.ORDERS_CSV, [])
@@ -185,8 +184,10 @@ def render_dashboard(settings: dict):
     # ========================================================
     st.markdown(
         f"""
-        <div style="font-size:1.8rem;font-weight:700;margin-bottom:0.25rem;">Total Portfolio Value</div>
-        <div style="font-size:2.2rem;font-weight:800;color:#072146;">{format_currency(portfolio_value_now)}</div>
+        <div class="tpv-wrap">
+        <div class="tpv-title">Total portfolio value</div>
+        <div class="tpv-value">{format_currency(portfolio_value_now)}</div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -234,13 +235,13 @@ def render_dashboard(settings: dict):
     # =========================
     d1, d2, d3 = st.columns(3)
     with d1:
-        st.write("**Timeline Cash**")
+        st.write("**Cash over time**")
         st.dataframe(free_tl, width="stretch", height=260)
     with d2:
-        st.write("**Cash Ledger (inventory aware)**")
+        st.write("**Event tracker**")
         st.dataframe(ledger, width="stretch", height=260)
     with d3:
-        st.write("**Audit – Shares Balance**")
+        st.write("**Shares Balance**")
         st.dataframe(audit, width="stretch", height=260)
 
     # =========================
