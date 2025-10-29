@@ -185,7 +185,7 @@ def render_dashboard(settings: dict):
                 st.rerun()
 
         with col2:
-            if st.button("💀 RESET DATABASE", type="secondary"):
+            if st.button("RESET DATABASE", type="secondary"):
                 empty_orders = pd.DataFrame(
                     columns=[
                         "ID","Underlying","Side","Type","OpenDate","Expiry","Strike",
@@ -202,7 +202,7 @@ def render_dashboard(settings: dict):
                 save_table(empty_orders, config.ORDERS_CSV)
                 save_table(empty_positions, config.POSITIONS_CSV)
                 save_table(empty_realized, config.REALIZED_CSV)
-                st.error("🗑️ DATABASE RESETTATO!")
+                st.error("DATABASE RESETTATO!")
                 st.rerun()
 
     st.markdown("---")
