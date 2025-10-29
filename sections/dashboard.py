@@ -277,36 +277,3 @@ def render_dashboard(settings: dict):
         with st.expander("Current Prices", expanded=False):
             price_rows = [{"Ticker": ul, "Current Price": format_currency(get_price_for(ul) or 0.0)} for ul in all_ul]
             st.dataframe(pd.DataFrame(price_rows), width="stretch")
-
-    # =========================
-    # Maintenance (in fondo)
-    # =========================
-    st.markdown("---")
-    with st.expander("Maintenance", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Rebuild realized from orders"):
-                _real_b = rebuild_realized_from_orders(orders)
-                save_table(_real_b, config.REALIZED_CSV)
-                st.success("Realized ricostruito e salvato da orders.")
-                st.rerun()
-        with col2:
-            if st.button("RESET DATABASE", type="secondary"):
-                empty_orders = pd.DataFrame(
-                    columns=[
-                        "ID","Underlying","Side","Type","OpenDate","Expiry","Strike",
-                        "Qty","PricePerContract","Fees","Delta","Notes","Status","CloseDate"
-                    ]
-                )
-                empty_positions = pd.DataFrame(columns=["Underlying", "Qty", "AvgCost"])
-                empty_realized = pd.DataFrame(
-                    columns=[
-                        "Underlying","Event","EventDate","Shares","Strike",
-                        "PremiumPerShare","AvgCostAtEvent","EquityPL","TotalPL","Notes"
-                    ]
-                )
-                save_table(empty_orders, config.ORDERS_CSV)
-                save_table(empty_positions, config.POSITIONS_CSV)
-                save_table(empty_realized, config.REALIZED_CSV)
-                st.error("DATABASE RESETTATO!")
-                st.rerun()
