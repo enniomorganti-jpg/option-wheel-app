@@ -1,4 +1,4 @@
 streamlit
 google-cloud-firestore
-pyrebase4
 firebase-admin
+requests

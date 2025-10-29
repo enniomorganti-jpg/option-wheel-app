@@ -104,12 +104,8 @@ if "user" not in st.session_state:
 
 def _set_database_user():
     if st.session_state.user is None:
-        database.set_current_user(None)
-    else:
-        database.set_current_user(st.session_state.user["uid"])
-
-
-_set_database_user()
+        return
+    database.set_current_user(st.session_state.user["uid"])
 
 with st.sidebar:
     st.header("Account")
@@ -152,11 +148,12 @@ with st.sidebar:
                         message = _firebase_error_message(exc)
                         st.error(f"Registrazione fallita: {message}")
     else:
+        _set_database_user()
         user_email = st.session_state.user.get("email", "utente")
         st.write(f"Loggato come **{user_email}**")
         if st.button("Esci", key="logout_button"):
             st.session_state.user = None
-            _set_database_user()
+            database.set_current_user(None)
             st.rerun()
 
     if st.session_state.user is None:
