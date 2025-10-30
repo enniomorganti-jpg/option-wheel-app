@@ -11,25 +11,19 @@ import streamlit as st
 
 import firebase_admin
 from firebase_admin import credentials, firestore as fb_admin_fs
+
 from google.api_core import exceptions as gexc
 
 import config
 
-# =========================
-# Firestore types & globals
-# =========================
-firestore = fb_admin_fs
+# Tipi Firestore
+firestore = fb_admin_fs  # alias coerente
 FSDocRef = fb_admin_fs.DocumentReference
 FSColRef = fb_admin_fs.CollectionReference
 FSClient = fb_admin_fs.Client
 
 _FIRESTORE_CLIENT: Optional[FSClient] = None
 _CURRENT_USER_UID: Optional[str] = None
-
-# --- Firestore timeouts & offline switch ---
-DEFAULT_FS_TIMEOUT = 6.0    # seconds per RPC
-FS_MAX_LIMIT = 5000         # safety cap for queries
-OFFLINE_MODE = bool(st.secrets.get("offline", False) or os.environ.get("OW_OFFLINE"))
 
 _COLLECTION_MAPPING = {
     config.ORDERS_CSV: "orders",
@@ -48,10 +42,9 @@ _SETTINGS_COLLECTION = "settings"
 _SETTINGS_DOCUMENT = "config"
 _DATE_FIELDS = ("OpenDate", "Expiry", "EventDate", "AsOf", "CloseDate")
 
-
-# =========================
-# Utils
-# =========================
+# -------------------------
+# Utility date
+# -------------------------
 def _norm_dates(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -60,14 +53,15 @@ def _norm_dates(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
     return df
 
-
-# =========================
-# Firestore credentials/client
-# =========================
+# -------------------------
+# Credenziali Firestore
+# -------------------------
 def _service_account_credentials() -> credentials.Certificate:
+    # Preferisci un blocco dedicato ai service account
     if "firebase_service_account" in st.secrets:
         raw = dict(st.secrets["firebase_service_account"])
     elif "firebase" in st.secrets:
+        # fallback: alcuni progetti mettono il SA dentro [firebase]
         fb = st.secrets["firebase"]
         raw = {
             "type": fb["type"],
@@ -85,11 +79,8 @@ def _service_account_credentials() -> credentials.Certificate:
         raise RuntimeError("Firebase service account non configurato nelle Streamlit secrets.")
     return credentials.Certificate(raw)
 
-
 def _get_firestore_client() -> FSClient:
     global _FIRESTORE_CLIENT
-    if OFFLINE_MODE:
-        raise RuntimeError("OFFLINE_MODE attivo: Firestore disabilitato.")
     if _FIRESTORE_CLIENT is not None:
         return _FIRESTORE_CLIENT
     cred = _service_account_credentials()
@@ -98,34 +89,29 @@ def _get_firestore_client() -> FSClient:
     _FIRESTORE_CLIENT = fb_admin_fs.client()
     return _FIRESTORE_CLIENT
 
-
-# =========================
-# Current user
-# =========================
+# -------------------------
+# Utente corrente
+# -------------------------
 def set_current_user(uid: Optional[str]):
     """Registra l'utente corrente per le operazioni Firestore."""
     global _CURRENT_USER_UID
     _CURRENT_USER_UID = uid
 
-
 def _require_user():
     if not _CURRENT_USER_UID:
         raise RuntimeError("Current user non impostato. Chiama set_current_user() dopo il login.")
-
 
 def _user_document() -> FSDocRef:
     _require_user()
     client = _get_firestore_client()
     return client.collection("users").document(_CURRENT_USER_UID)
 
-
 def _collection_for_name(name: str) -> Optional[str]:
     return _COLLECTION_MAPPING.get(name)
 
-
-# =========================
-# Serialization
-# =========================
+# -------------------------
+# Serializzazione
+# -------------------------
 def _serialize_value(value):
     if value is None:
         return None
@@ -147,7 +133,6 @@ def _serialize_value(value):
             return value
     return value
 
-
 def _serialize_dataframe(df: pd.DataFrame) -> List[Dict]:
     if df is None or df.empty:
         return []
@@ -161,39 +146,31 @@ def _serialize_dataframe(df: pd.DataFrame) -> List[Dict]:
         records.append(rec)
     return records
 
-
-# =========================
-# Firestore helpers (robusti/veloci)
-# =========================
+# -------------------------
+# Firestore helpers robusti
+# -------------------------
 def _fs_collection(name: str) -> Tuple[Optional[str], Optional[FSColRef]]:
     coll_name = _collection_for_name(name)
     if not coll_name:
         return None, None
     return coll_name, _user_document().collection(coll_name)
 
-
 def _retry_once(fn, *args, **kwargs):
-    """
-    Tenta 1 volta con timeout, poi retry 1 volta dopo 0.5s.
-    (Se l'API non supporta 'timeout', viene ignorato senza errori.)
-    """
-    kwargs.setdefault("timeout", DEFAULT_FS_TIMEOUT)
+    """Piccolo retry con backoff: tenta, poi retry 1 volta dopo 0.5s."""
     try:
         return fn(*args, **kwargs)
-    except (gexc.GoogleAPICallError, gexc.RetryError, gexc.DeadlineExceeded, TimeoutError):
+    except (gexc.GoogleAPICallError, gexc.RetryError, gexc.DeadlineExceeded):
         time.sleep(0.5)
-        kwargs["timeout"] = DEFAULT_FS_TIMEOUT
         return fn(*args, **kwargs)
 
-
-@st.cache_data(ttl=20, max_entries=16, show_spinner=False)
-def _cached_fs_get(user_uid: str, coll_path: str, limit_n: int = FS_MAX_LIMIT) -> List[Dict]:
-    """Cache letture: usa get() (no stream), fail-fast con timeout."""
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_fs_get(user_uid: str, coll_path: str, limit_n: int = 5000) -> List[Dict]:
+    """Cache delle letture per ridurre carico e retry su Cloud."""
     client = _get_firestore_client()
+    # ricostruisci ref
     coll = client.collection("users").document(user_uid).collection(coll_path)
-    docs = _retry_once(coll.limit(limit_n).get, retry=None, timeout=DEFAULT_FS_TIMEOUT)
+    docs = _retry_once(coll.limit(limit_n).get)
     return [d.to_dict() for d in docs]
-
 
 def _safe_warn(msg: str):
     try:
@@ -201,40 +178,44 @@ def _safe_warn(msg: str):
     except Exception:
         pass
 
-
-# =========================
-# Firestore CRUD
-# =========================
+# -------------------------
+# CRUD Firestore
+# -------------------------
 def _delete_collection(collection_ref: FSColRef):
-    docs = _retry_once(collection_ref.get, retry=None, timeout=DEFAULT_FS_TIMEOUT)
-    client = _get_firestore_client()
-    batch = client.batch()
+    # usa get() invece di stream() (più robusto su Cloud)
+    docs = _retry_once(collection_ref.get)
+    batch = _get_firestore_client().batch()
     count = 0
     for d in docs:
         batch.delete(d.reference)
         count += 1
+        # commit a chunk per evitare batch enormi
         if count % 400 == 0:
-            _retry_once(batch.commit, timeout=DEFAULT_FS_TIMEOUT)
-            batch = client.batch()
-    _retry_once(batch.commit, timeout=DEFAULT_FS_TIMEOUT)
-
+            _retry_once(batch.commit)
+            batch = _get_firestore_client().batch()
+    _retry_once(batch.commit)
 
 def _load_table_firestore(name: str, cols: List[str]) -> pd.DataFrame:
-    if OFFLINE_MODE:
-        _safe_warn("Modalità offline: salto Firestore e mostro tabella vuota.")
+    coll_name, coll_ref = _fs_collection(name)
+    if not coll_name or coll_ref is None:
         return pd.DataFrame(columns=cols)
 
-    coll_name, coll_ref = _fs_collection(name)
-    if not coll_name or coll_ref is None or not _CURRENT_USER_UID:
+    # se non c'è utente, torna vuoto (o potresti fare CSV)
+    if not _CURRENT_USER_UID:
         return pd.DataFrame(columns=cols)
 
     try:
-        rows = _cached_fs_get(_CURRENT_USER_UID, coll_name, limit_n=FS_MAX_LIMIT)
+        rows = _cached_fs_get(_CURRENT_USER_UID, coll_name, limit_n=5000)
         df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
+    except (gexc.GoogleAPICallError, gexc.RetryError, gexc.DeadlineExceeded) as e:
+        _safe_warn("Cloud DB lento o non disponibile: dati non caricati (mostro tabella vuota).")
+        return pd.DataFrame(columns=cols)
     except Exception:
-        _safe_warn("Cloud DB lento/non disponibile: tabella vuota (fail-fast).")
+        # qualunque altro errore: fallback soft
+        _safe_warn("Errore inatteso in lettura Cloud DB: tabella vuota.")
         return pd.DataFrame(columns=cols)
 
+    # ordering stabile se possibile
     if not df.empty:
         if "ID" in df.columns:
             df = df.sort_values("ID")
@@ -246,7 +227,6 @@ def _load_table_firestore(name: str, cols: List[str]) -> pd.DataFrame:
 
     return _norm_dates(df)
 
-
 def _doc_id_for_record(collection_name: str, record: Dict, index: int) -> str:
     key_field = _DOC_ID_FIELDS.get(collection_name)
     if key_field:
@@ -255,19 +235,20 @@ def _doc_id_for_record(collection_name: str, record: Dict, index: int) -> str:
             return str(value)
     return str(index)
 
-
 def _save_table_firestore(df: pd.DataFrame, name: str):
     coll_name, coll_ref = _fs_collection(name)
     if not coll_name or coll_ref is None:
         return
     user_doc = _user_document()
-    _retry_once(user_doc.set, {}, merge=True, timeout=DEFAULT_FS_TIMEOUT)
+    _retry_once(user_doc.set, {}, merge=True)
 
+    # cancella vecchi doc
     _delete_collection(coll_ref)
 
     records = _serialize_dataframe(df)
     client = _get_firestore_client()
 
+    # scrivi in batch per performance/robustezza
     batch = client.batch()
     count = 0
     for idx, record in enumerate(records):
@@ -275,35 +256,28 @@ def _save_table_firestore(df: pd.DataFrame, name: str):
         batch.set(coll_ref.document(doc_id), record)
         count += 1
         if count % 400 == 0:
-            _retry_once(batch.commit, timeout=DEFAULT_FS_TIMEOUT)
+            _retry_once(batch.commit)
             batch = client.batch()
-    _retry_once(batch.commit, timeout=DEFAULT_FS_TIMEOUT)
-
+    _retry_once(batch.commit)
 
 def _load_settings_firestore() -> Dict:
-    if OFFLINE_MODE:
-        _safe_warn("Modalità offline: uso impostazioni di default.")
-        return {"starting_cash": config.DEFAULT_STARTING_CASH, **config.DEFAULT_IBKR_CONFIG}
-
     user_doc = _user_document()
     settings_doc = user_doc.collection(_SETTINGS_COLLECTION).document(_SETTINGS_DOCUMENT)
     try:
-        snapshot = _retry_once(settings_doc.get, timeout=DEFAULT_FS_TIMEOUT)
+        snapshot = _retry_once(settings_doc.get)
         if not snapshot.exists:
             return {"starting_cash": config.DEFAULT_STARTING_CASH, **config.DEFAULT_IBKR_CONFIG}
         data = snapshot.to_dict() or {}
         return {"starting_cash": config.DEFAULT_STARTING_CASH, **config.DEFAULT_IBKR_CONFIG, **data}
-    except Exception:
+    except (gexc.GoogleAPICallError, gexc.RetryError, gexc.DeadlineExceeded):
         _safe_warn("Impossibile leggere le impostazioni dal Cloud DB: uso default locali.")
         return {"starting_cash": config.DEFAULT_STARTING_CASH, **config.DEFAULT_IBKR_CONFIG}
 
-
 def _save_settings_firestore(settings: Dict):
     user_doc = _user_document()
-    _retry_once(user_doc.set, {}, merge=True, timeout=DEFAULT_FS_TIMEOUT)
+    _retry_once(user_doc.set, {}, merge=True)
     settings_doc = user_doc.collection(_SETTINGS_COLLECTION).document(_SETTINGS_DOCUMENT)
-    _retry_once(settings_doc.set, settings, timeout=DEFAULT_FS_TIMEOUT)
-
+    _retry_once(settings_doc.set, settings)
 
 def _wipe_all_data_firestore():
     user_doc = _user_document()
@@ -311,10 +285,9 @@ def _wipe_all_data_firestore():
         _delete_collection(user_doc.collection(coll_name))
     _delete_collection(user_doc.collection(_SETTINGS_COLLECTION))
 
-
-# =========================
+# -------------------------
 # CSV Backend
-# =========================
+# -------------------------
 def _load_csv(path: str, cols: List[str]) -> pd.DataFrame:
     try:
         df = pd.read_csv(path)
@@ -322,10 +295,8 @@ def _load_csv(path: str, cols: List[str]) -> pd.DataFrame:
         df = pd.DataFrame(columns=cols)
     return _norm_dates(df)
 
-
 def _save_csv(df: pd.DataFrame, path: str):
     df.to_csv(path, index=False)
-
 
 def _load_settings_json() -> Dict:
     try:
@@ -334,20 +305,17 @@ def _load_settings_json() -> Dict:
     except FileNotFoundError:
         return {"starting_cash": config.DEFAULT_STARTING_CASH, **config.DEFAULT_IBKR_CONFIG}
 
-
 def _save_settings_json(s: Dict):
     with open(config.SETTINGS_JSON, "w") as f:
         json.dump(s, f, indent=2)
 
-
-# =========================
+# -------------------------
 # SQLite Backend
-# =========================
+# -------------------------
 def _db_conn():
     conn = sqlite3.connect(config.DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def _db_init():
     with _db_conn() as conn:
@@ -376,7 +344,6 @@ def _db_init():
         );
         """)
         conn.commit()
-
 
 def _migrate_from_csv_if_needed():
     """Importa CSV se il DB è vuoto"""
@@ -412,10 +379,9 @@ def _migrate_from_csv_if_needed():
             except Exception:
                 pass
 
-
-# =========================
+# -------------------------
 # Public API
-# =========================
+# -------------------------
 def load_table(name: str, cols: List[str]) -> pd.DataFrame:
     # Se loggato → Firestore
     if _CURRENT_USER_UID:
@@ -440,7 +406,6 @@ def load_table(name: str, cols: List[str]) -> pd.DataFrame:
                     return pd.DataFrame(columns=cols)
     return _load_csv(name, cols)
 
-
 def save_table(df: pd.DataFrame, name: str):
     if _CURRENT_USER_UID:
         _save_table_firestore(df, name)
@@ -456,7 +421,7 @@ def save_table(df: pd.DataFrame, name: str):
         tbl = mapping.get(name)
         if tbl:
             df_copy = df.copy()
-            for col in ("OpenDate", "Expiry", "EventDate", "AsOf", "CloseDate"):
+            for col in ("OpenDate","Expiry","EventDate","AsOf","CloseDate"):
                 if col in df_copy.columns:
                     df_copy[col] = pd.to_datetime(df_copy[col], errors="coerce").dt.strftime("%Y-%m-%d")
             with _db_conn() as conn:
@@ -466,7 +431,6 @@ def save_table(df: pd.DataFrame, name: str):
                 conn.commit()
     else:
         _save_csv(df, name)
-
 
 def load_settings() -> Dict:
     if _CURRENT_USER_UID:
@@ -481,7 +445,6 @@ def load_settings() -> Dict:
     else:
         return _load_settings_json()
 
-
 def save_settings(settings: Dict):
     if _CURRENT_USER_UID:
         _save_settings_firestore(settings)
@@ -495,7 +458,6 @@ def save_settings(settings: Dict):
             conn.commit()
     else:
         _save_settings_json(settings)
-
 
 def wipe_all_data():
     """Cancella tutti i dati"""
